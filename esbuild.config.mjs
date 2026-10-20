@@ -29,6 +29,8 @@ await esbuild.build({
   platform: 'browser',
   external: ['obsidian', 'electron', '@codemirror/*', '@lezer/*', ...builtinModules],
   outfile: 'main.js',
+  // The user manual is compiled in, so every install has it.
+  loader: { '.md': 'text' },
   minify: production,
   sourcemap: production ? false : 'inline',
   legalComments: 'none',

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0 (in progress)
+
+- Built-in user manual: command "Open the user manual", a button in settings and on the welcome screen. Also in MANUAL.md.
+- To be ported from the personal build before release: cinematic camera, span across monitors, light theme on every view, claims, handoffs, trust scores, gap radar, daily brief. See the next-update backlog.
+
 ## 1.0.4
 
 - Community directory source checks: no lint-rule suppressions. The web viewer and layout worker now satisfy the rules directly (window.fetch, the worker's own timers, no globalThis).

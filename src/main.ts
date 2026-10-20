@@ -11,6 +11,7 @@ import { BrainSearch } from './brainsearch';
 import { HoverCard } from './hovercard';
 import { GrowthBar } from './growth';
 import { WelcomeModal, connectSection } from './onboarding';
+import { MANUAL_VIEW_TYPE, ManualView } from './manual';
 import { PhoneAlerts, PhoneFormat, randomTopic } from './phone';
 import { WebViewer } from './webviewer';
 import { meaningLinks } from './semantic';
@@ -243,6 +244,8 @@ export default class PlexusPlugin extends Plugin {
     });
     this.monitor = new Monitor(() => this.views()[0]?.renderer?.stats() ?? null);
     this.registerView(VIEW_TYPE, (leaf) => new PlexusView(leaf, this));
+    this.registerView(MANUAL_VIEW_TYPE, (leaf) => new ManualView(leaf));
+    this.addCommand({ id: 'open-manual', name: 'Open the user manual', callback: () => void this.openManual() });
     this.registerView(LOG_VIEW_TYPE, (leaf) => new AccessLogView(leaf, {
       log: this.log,
       monitor: this.monitor,
@@ -312,7 +315,7 @@ export default class PlexusPlugin extends Plugin {
           const setting = (this.app as any).setting;
           setting?.open?.();
           setting?.openTabById?.(this.manifest.id);
-        }).open();
+        }, () => void this.openManual()).open();
         this.settings.welcomed = true;
         void this.saveData(this.settings);
       });
@@ -477,6 +480,14 @@ export default class PlexusPlugin extends Plugin {
     void this.app.workspace.openLinkText(path, '', 'tab');
     const i = this.getGraph().paths.indexOf(path);
     if (i >= 0) for (const v of this.views()) v.renderer?.highlight(i);
+  }
+
+  /** The built-in user manual, in a tab (reused if already open). */
+  async openManual() {
+    const existing = this.app.workspace.getLeavesOfType(MANUAL_VIEW_TYPE)[0];
+    const leaf = existing ?? this.app.workspace.getLeaf('tab');
+    if (!existing) await leaf.setViewState({ type: MANUAL_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   async activate() {
@@ -1732,6 +1743,9 @@ class PlexusSettingTab extends PluginSettingTab {
     const s = this.plugin.settings;
     const save = () => void this.plugin.saveSettings();
     containerEl.empty();
+
+    new Setting(containerEl).setName('User manual').setDesc('Everything H!V3MYND does, where to find it, and how to connect agents.')
+      .addButton((b) => b.setButtonText('Open').setCta().onClick(() => void this.plugin.openManual()));
 
     const slider = (name: string, desc: string, key: keyof PlexusSettings, min: number, max: number, step: number) =>
       new Setting(containerEl).setName(name).setDesc(desc).addSlider((sl) =>

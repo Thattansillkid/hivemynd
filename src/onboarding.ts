@@ -46,7 +46,7 @@ export function connectSection(containerEl: HTMLElement, port: number, key: stri
 
 /** Shown once after install. */
 export class WelcomeModal extends Modal {
-  constructor(app: App, private openBrain: () => void, private openSettings: () => void) {
+  constructor(app: App, private openBrain: () => void, private openSettings: () => void, private openManual: () => void) {
     super(app);
   }
 
@@ -62,6 +62,7 @@ export class WelcomeModal extends Modal {
       'Everything stays on this computer. Nothing is sent anywhere unless you turn on phone alerts or the web viewer.',
     ]) ul.createEl('li', { text: t });
     const row = contentEl.createDiv({ cls: 'modal-button-container' });
+    row.createEl('button', { text: 'User manual' }).addEventListener('click', () => { this.close(); this.openManual(); });
     row.createEl('button', { text: 'Connect agents' }).addEventListener('click', () => { this.close(); this.openSettings(); });
     row.createEl('button', { cls: 'mod-cta', text: 'Open the brain' }).addEventListener('click', () => { this.close(); this.openBrain(); });
   }

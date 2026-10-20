@@ -1462,3 +1462,9 @@ body.plexus-light-window .view-header { border-bottom: 1px solid rgba(15, 37, 64
 .plexus-welcome li { margin: 4px 0; }
 
 .workspace-leaf-content .view-content.plexus-log { padding: 0; }
+
+/* ------------------------------------------------------------------ User manual */
+.hivemynd-manual { overflow-y: auto; }
+.hivemynd-manual-page { max-width: 860px; margin: 0 auto; padding: 12px 28px 48px; user-select: text; }
+.hivemynd-manual-page table { font-size: var(--font-ui-small); }
+

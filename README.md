@@ -19,6 +19,10 @@ Hivemynd is the name in Obsidian's community plugins; H!V3MYND is the brand. Fre
 - **Permissions:** per-agent hidden folders and read-only, enforced by the optional bridge. Bridges you extend with PC actions can ask you to approve each one.
 - **Optional extras (off by default):** music reactivity, phone alerts, a read-only web viewer for other devices.
 
+## User manual
+
+The full manual is built into the plugin: run **Hivemynd: Open the user manual** from the command palette, or click **User manual** at the top of the plugin's settings. You can also read it here: [MANUAL.md](MANUAL.md).
+
 ## Install
 
 **From Obsidian:** Settings → Community plugins → Browse → search **Hivemynd** → Install → Enable.
