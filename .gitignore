@@ -1,0 +1,17 @@
+# build output (attached to GitHub releases, not committed)
+main.js
+*.map
+node_modules/
+
+# local only
+.gstack/
+data.json
+bridge/config.json
+bridge/__pycache__/
+*.bak*
+.DS_Store
+Thumbs.db
+
+# demo vault: keep notes, not workspace state
+demo-vault/.obsidian/workspace*.json
+demo-vault/.obsidian/plugins/

@@ -1,0 +1,11 @@
+H!V3MYND (Hivemynd)
+Copyright 2026 J Tansill
+
+This product bundles the following third-party software, each under its own license:
+
+- three.js (https://threejs.org) - MIT License, Copyright 2010-2026 three.js authors
+- d3-force-3d, d3-octree, d3-binarytree (https://github.com/vasturiano) - MIT License, Copyright Vasco Asturiano
+- d3-quadtree, d3-dispatch, d3-timer (https://d3js.org) - ISC License, Copyright Mike Bostock
+
+The names "H!V3MYND" and "Hivemynd" and their logos are not licensed under the
+Apache License; see the Trademarks section of README.md.
