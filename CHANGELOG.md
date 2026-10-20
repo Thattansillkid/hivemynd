@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- README title now matches the plugin name (community directory check).
+
 ## 1.0.0
 
 First public release.

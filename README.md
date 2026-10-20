@@ -1,10 +1,10 @@
-# H!V3MYND
+# Hivemynd
 
-**Your Obsidian vault as a living 3D brain, and a window into what your AI agents do in it.**
+**H!V3MYND: your Obsidian vault as a living 3D brain, and a window into what your AI agents do in it.**
 
 Notes are neurons, links are connections, and the brain fires on its own. When an AI agent (Claude Code, Codex, Gemini, Grok, Cursor or anything you script) reads or writes a note, its signal travels through the brain in that agent's colour. You can watch it live, replay it, audit it, and limit what each agent may touch.
 
-Listed in Obsidian's community plugins as **Hivemynd**. Free and open source (Apache-2.0). Desktop only.
+Hivemynd is the name in Obsidian's community plugins; H!V3MYND is the brand. Free and open source (Apache-2.0). Desktop only.
 
 ## Features
 
