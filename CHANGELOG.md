@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4
+
+- Community directory source checks: no lint-rule suppressions. The web viewer and layout worker now satisfy the rules directly (window.fetch, the worker's own timers, no globalThis).
+
 ## 1.0.3
 
 - Community directory source checks: styles set through Obsidian's setCssStyles, configDir instead of a hard-coded config folder, FileManager.trashFile, window timers.

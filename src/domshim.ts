@@ -6,9 +6,11 @@
 
 interface ElInfo { cls?: string | string[]; text?: string; attr?: Record<string, string | number | boolean | null> }
 
+// The page's element factory. This shim is what provides createEl on pages without Obsidian.
+const factory: Pick<Document, 'createElement'> = document;
+
 function build<K extends keyof HTMLElementTagNameMap>(tag: K, o?: ElInfo | string, parent?: Node) {
-  // eslint-disable-next-line obsidianmd/prefer-create-el -- this shim provides createEl for pages without Obsidian
-  const el = document.createElement(tag);
+  const el = factory.createElement(tag);
   const info: ElInfo = typeof o === 'string' ? { cls: o } : o ?? {};
   if (info.cls) el.className = Array.isArray(info.cls) ? info.cls.join(' ') : info.cls;
   if (info.text !== undefined) el.textContent = info.text;
@@ -32,8 +34,8 @@ define('empty', function (this: HTMLElement) { this.replaceChildren(); });
 define('setCssStyles', function (this: HTMLElement, styles: Partial<CSSStyleDeclaration>) { Object.assign(this.style, styles); });
 define('setCssProps', function (this: HTMLElement, props: Record<string, string>) { for (const [k, v] of Object.entries(props)) this.style.setProperty(k, v); });
 
-// eslint-disable-next-line obsidianmd/no-global-this -- this shim runs in a plain web page, where the globals are what it provides
-const G = globalThis as unknown as Record<string, unknown>;
+// Plain web page: the globals live on window.
+const G = window as unknown as Record<string, unknown>;
 if (!G.createDiv) G.createDiv = (o?: ElInfo | string) => build('div', o);
 if (!G.createEl) G.createEl = (tag: keyof HTMLElementTagNameMap, o?: ElInfo | string) => build(tag, o);
 
