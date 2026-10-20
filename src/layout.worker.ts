@@ -14,6 +14,7 @@ self.onmessage = (e: MessageEvent<{ n: number; links: [number, number][]; cached
     while (performance.now() - t0 < 50 && sim.alpha() > sim.alphaMin()) sim.tick();
     const done = sim.alpha() <= sim.alphaMin();
     post(done);
+    // eslint-disable-next-line obsidianmd/prefer-window-timers -- runs in a Web Worker, which has no window
     if (!done) setTimeout(run, 0);
   };
   run();

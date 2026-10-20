@@ -11,14 +11,14 @@ export class HoverCard {
 
   constructor(parent: HTMLElement, private app: App, private log: () => AccessLog, private linkCounts: (path: string) => { out: number; in: number }, private agentColor: (a: string) => string) {
     this.el = parent.createDiv({ cls: 'plexus-card' });
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
   }
 
   /** Called every frame with the hovered note (or -1) and its screen position. */
   update(path: string | null, index: number, x: number, y: number) {
-    if (!path || index < 0) { this.el.style.display = 'none'; this.shown = -1; return; }
+    if (!path || index < 0) { this.el.setCssStyles({ display: 'none' }); this.shown = -1; return; }
     if (index !== this.shown) { this.shown = index; void this.fill(path); }
-    this.el.style.display = 'block';
+    this.el.setCssStyles({ display: 'block' });
     // Keep the card on-screen: flip left/up near the edges.
     const pw = this.el.parentElement?.clientWidth ?? 0, ph = this.el.parentElement?.clientHeight ?? 0;
     const w = this.el.offsetWidth, h = this.el.offsetHeight;
@@ -50,7 +50,7 @@ export class HoverCard {
     if (my !== this.token) return;
     // Skip frontmatter by Obsidian's own parse (handles CRLF); regex as a fallback.
     const fmEnd = this.app.metadataCache.getFileCache(f)?.frontmatterPosition?.end.offset;
-    const body = (fmEnd ? text.slice(fmEnd) : text.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/, ''))
+    const body = (fmEnd ? text.slice(fmEnd) : text.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n?/, ''))
       .replace(/^---\s*/, '')
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, '$2').replace(/https?:\/\/\S+/g, '').replace(/[#>*_`[\]]+/g, '').replace(/\s+/g, ' ').trim();
     excerpt.setText(body ? body.slice(0, 220) + (body.length > 220 ? '…' : '') : '(empty note)');

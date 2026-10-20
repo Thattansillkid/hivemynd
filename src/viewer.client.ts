@@ -1,3 +1,4 @@
+import './domshim'; // Obsidian DOM helpers the renderer expects (this page has no Obsidian)
 import { PlexusRenderer, DEFAULT_OPTIONS, PlexusOptions, TouchMode } from './renderer';
 
 // Read-only brain in a browser (phone, tablet, second screen). Served by the plugin
@@ -19,6 +20,7 @@ const status = document.getElementById('status')!;
 const say = (t: string) => { status.textContent = t; };
 
 async function main() {
+  // eslint-disable-next-line no-restricted-globals -- standalone web page, not inside Obsidian: requestUrl is unavailable
   const res = await fetch('graph', { headers: { 'X-Hivemynd-View': key }, cache: 'no-store' });
   if (!res.ok) { say(res.status === 401 ? 'This link has expired or the key is wrong.' : `Couldn't load the brain (${res.status}).`); return; }
   const g: GraphPayload = await res.json();
@@ -31,8 +33,9 @@ async function main() {
 // Live agent activity. Server-sent events carry a header-less request, so the key
 // rides in a short-lived ticket instead of the URL.
 async function listen(r: PlexusRenderer) {
+  // eslint-disable-next-line no-restricted-globals -- standalone web page, not inside Obsidian: requestUrl is unavailable
   const t = await fetch('ticket', { method: 'POST', headers: { 'X-Hivemynd-View': key } }).then((x) => (x.ok ? x.text() : ''), () => '');
-  if (!t) { say('Live updates unavailable; retrying…'); setTimeout(() => listen(r), 5000); return; }
+  if (!t) { say('Live updates unavailable; retrying…'); window.setTimeout(() => listen(r), 5000); return; }
   const es = new EventSource(`events?ticket=${encodeURIComponent(t)}`);
   es.onmessage = (e) => {
     try {
@@ -40,7 +43,7 @@ async function listen(r: PlexusRenderer) {
       r.touch(d.i, d.a, d.k);
     } catch { /* ignore */ }
   };
-  es.onerror = () => { es.close(); say('Reconnecting…'); setTimeout(() => listen(r), 3000); };
+  es.onerror = () => { es.close(); say('Reconnecting…'); window.setTimeout(() => listen(r), 3000); };
   es.onopen = () => say(`${status.textContent?.split(' · ')[0]} · read-only · live`);
 }
 

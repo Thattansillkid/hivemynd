@@ -36,7 +36,7 @@ export class ReplayBar {
 
   constructor(parent: HTMLElement, private host: ReplayHost) {
     this.el = parent.createDiv({ cls: 'plexus-replay' });
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     const controls = this.el.createDiv({ cls: 'plexus-replay-controls' });
     const title = controls.createDiv({ cls: 'plexus-replay-title' });
     setIcon(title.createSpan(), 'history');
@@ -69,7 +69,7 @@ export class ReplayBar {
   }
 
   private async openBar() {
-    this.el.style.display = 'block';
+    this.el.setCssStyles({ display: 'block' });
     this.host.setReplaying(true);
     this.host.renderer()?.setFeedOffset(this.el.offsetHeight + 24);
     // Open on the smallest range that holds the last day's activity.
@@ -83,7 +83,7 @@ export class ReplayBar {
 
   close() {
     this.pause();
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     this.host.renderer()?.setFeedOffset(0);
     this.host.setReplaying(false);
     this.host.renderer()?.clearAgentGlow();

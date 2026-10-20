@@ -642,7 +642,7 @@ export default class PlexusPlugin extends Plugin {
             const buf = new Float32Array(an.fftSize);
             let peak = 0;
             const end = performance.now() + 800;
-            while (performance.now() < end) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => setTimeout(r, 30)); }
+            while (performance.now() < end) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => window.setTimeout(r, 30)); }
             stream.getTracks().forEach((t) => t.stop());
             void ctx.close();
             result = { ok: true, peak: Math.round(peak * 1000) / 1000 };
@@ -1154,7 +1154,7 @@ export default class PlexusPlugin extends Plugin {
       let rel: string | null = null;
       if (base && t.toLowerCase().startsWith(base.toLowerCase() + '/')) rel = t.slice(base.length + 1);
       else if (!/^[a-z]:\//i.test(t) && !t.startsWith('/')) rel = t;
-      if (rel && !rel.startsWith('.obsidian/')) out.add(normalizePath(rel));
+      if (rel && !rel.startsWith(`${this.app.vault.configDir}/`)) out.add(normalizePath(rel));
     }
     return [...out];
   }
@@ -1203,7 +1203,7 @@ export default class PlexusPlugin extends Plugin {
       if (c.before === null) {
         // The write created the note: undo moves it to Obsidian's trash (recoverable).
         const f = this.app.vault.getAbstractFileByPath(c.path);
-        if (f) await this.app.vault.trash(f, false);
+        if (f) await this.app.fileManager.trashFile(f);
       } else {
         const f = this.app.vault.getAbstractFileByPath(c.path);
         if (f instanceof TFile) await this.app.vault.process(f, () => c.before as string);
@@ -1815,7 +1815,7 @@ class PlexusSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Agent permissions').setHeading();
     containerEl.createEl('p', {
       cls: 'setting-item-description',
-      text: 'Limit what each agent may do through the bridge. The bridge enforces these; a blocked attempt shows as a red alert. PC control covers commands, apps, web pages, screenshots and files outside the vault: Allow, Ask (you approve each action here; unanswered = denied) or Block. Some paths are always off limits whatever you choose: the bridge folder, agent configs (.claude, .grok, .hivemynd), credentials, browser profiles, startup folders and the vault\u2019s .obsidian folder. Needs the bridge policy file path below.',
+      text: 'Limit what each agent may do through the bridge. The bridge enforces these; a blocked attempt shows as a red alert. PC control covers commands, apps, web pages, screenshots and files outside the vault: Allow, Ask (you approve each action here; unanswered = denied) or Block. Some paths are always off limits whatever you choose: the bridge folder, agent configs (.claude, .grok, .hivemynd), credentials, browser profiles, startup folders and the vault\u2019s configuration folder. Needs the bridge policy file path below.',
     });
     new Setting(containerEl).setName('Bridge policy file').setDesc('Full path of agent_policies.json next to your bridge, e.g. C:\\hivemynd\\bridge\\agent_policies.json. Leave empty if you don’t run a bridge.').addText((t) =>
       t.setValue(s.policyFile).onChange(debounce((v: string) => { s.policyFile = v.trim(); save(); this.plugin.writePolicies(); }, 800, true)));
@@ -1841,7 +1841,7 @@ class PlexusSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Watched folders and notes').setDesc('One path prefix per line; add ": read, write, search" to choose what alerts. Any agent touching these flashes red in the brain and raises an alert. You can also right-click a note or folder → Watch in H!V3MYND.').addTextArea((t) => {
       t.setValue(s.watchlist).onChange(debounce((v: string) => { s.watchlist = v; save(); }, 600, true));
       t.inputEl.rows = 7;
-      t.inputEl.style.width = '100%';
+      t.inputEl.setCssStyles({ width: '100%' });
     });
     toggle('Desktop notifications', 'Also show a Windows notification for watchlist alerts.', 'watchNotify');
 

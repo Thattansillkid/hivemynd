@@ -42,7 +42,7 @@ export class Dashboard {
   constructor(private grid: HTMLElement, panels: PanelDef[], saved: PanelPos[] | null, private onChange: (layout: PanelPos[]) => void) {
     grid.addClass('pm-dash');
     this.ghost = grid.createDiv({ cls: 'pm-dash-ghost' });
-    this.ghost.style.display = 'none';
+    this.ghost.setCssStyles({ display: 'none' });
     for (const d of panels) this.defs.set(d.id, d);
     // Saved positions win; panels added in later versions get their default slot.
     for (const p of [...(saved ?? []), ...DEFAULT_LAYOUT]) {
@@ -64,7 +64,7 @@ export class Dashboard {
 
   /** Row height so the whole layout fills the window's height. */
   private fit() {
-    if (this.narrow()) { this.grid.style.gridAutoRows = ''; return; }
+    if (this.narrow()) { this.grid.setCssStyles({ gridAutoRows: '' }); return; }
     const rows = Math.max(1, ...[...this.pos.values()].filter((p) => !p.hidden).map((p) => p.y + p.h));
     const cs = getComputedStyle(this.grid);
     const inner = this.grid.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
@@ -146,7 +146,7 @@ export class Dashboard {
     const start = { x: e.clientX, y: e.clientY, px: p.x, py: p.y, pw: p.w, ph: p.h };
     el.addClass('is-dragging');
     this.grid.addClass('is-dragging-any'); // hold row height steady mid-drag
-    this.ghost.style.display = '';
+    this.ghost.setCssStyles({ display: '' });
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - start.x) / cw);
       const dy = Math.round((ev.clientY - start.y) / rh);
@@ -168,8 +168,8 @@ export class Dashboard {
       el.removeEventListener('pointercancel', up);
       el.removeClass('is-dragging');
       this.grid.removeClass('is-dragging-any');
-      el.style.transform = '';
-      this.ghost.style.display = 'none';
+      el.setCssStyles({ transform: '' });
+      this.ghost.setCssStyles({ display: 'none' });
       this.settle(null);
       this.apply();
       this.fit();

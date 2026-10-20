@@ -15,3 +15,6 @@ Thumbs.db
 # demo vault: keep notes, not workspace state
 demo-vault/.obsidian/workspace*.json
 demo-vault/.obsidian/plugins/
+
+# local tooling
+.claude/

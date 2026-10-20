@@ -86,7 +86,7 @@ export class AudioReactor {
         while (performance.now() < end) {
           an.getFloatTimeDomainData(buf);
           for (const v of buf) peak = Math.max(peak, Math.abs(v));
-          await new Promise((r) => setTimeout(r, 30));
+          await new Promise((r) => window.setTimeout(r, 30));
         }
         out[id] = peak;
       } catch {
@@ -114,7 +114,7 @@ export class AudioReactor {
       while (performance.now() < end) {
         an.getFloatTimeDomainData(buf);
         for (const v of buf) peak = Math.max(peak, Math.abs(v));
-        await new Promise((r) => setTimeout(r, 30));
+        await new Promise((r) => window.setTimeout(r, 30));
       }
       return peak;
     } catch {

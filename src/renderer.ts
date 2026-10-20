@@ -251,7 +251,7 @@ export class PlexusRenderer {
     this.renderer.setClearColor(0x000000, 1);
     this.canvas = this.renderer.domElement;
     this.canvas.addClass('plexus-canvas');
-    if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
+    if (getComputedStyle(container).position === 'static') container.setCssStyles({ position: 'relative' });
     container.appendChild(this.canvas);
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.5, 50000);
@@ -799,9 +799,9 @@ export class PlexusRenderer {
   }
 
   private drawMeter(lv: { bass: number; mid: number; high: number; beat: number } | null) {
-    if (!lv || !this.audio) { if (this.meter) this.meter.style.display = 'none'; return; }
+    if (!lv || !this.audio) { if (this.meter) this.meter.setCssStyles({ display: 'none' }); return; }
     if (!this.meter) this.buildMeter();
-    this.meter!.style.display = 'block';
+    this.meter!.setCssStyles({ display: 'block' });
     const bars = this.meter!.querySelectorAll<HTMLElement>('.pxm-bar');
     [lv.bass, lv.mid, lv.high].forEach((v, i) => { bars[i].style.width = `${Math.round(v * 100)}%`; });
     const title = this.meter!.querySelector<HTMLElement>('.pxm-title')!;
@@ -1430,7 +1430,7 @@ export class PlexusRenderer {
     const agent = this.opts.agents[slot];
     const color = agent?.color ?? '#ffffff';
     const name = path.split('/').pop()!.replace(/\.md$/i, '');
-    const row = document.createElement('div');
+    const row = createDiv();
     row.textContent = `${(agent?.name ?? 'agent').toUpperCase()}  ${MODE_LABEL[mode]}  ›  ${name}`;
     row.className = 'pxo-feed-row';
     row.style.setProperty('--agent', color);
@@ -1449,8 +1449,7 @@ export class PlexusRenderer {
 
   /** An HTML layer over the canvas; its look lives in styles.css under `cls`. */
   private overlay(cls: string) {
-    const el = document.createElement('div');
-    el.className = cls;
+    const el = createDiv({ cls });
     this.container.appendChild(el);
     return el;
   }
@@ -1492,7 +1491,7 @@ export class PlexusRenderer {
     this.hover = i;
     this.u.uHover.value = i;
     this.canvas.style.cursor = i >= 0 ? 'pointer' : 'grab';
-    if (i < 0 || !this.graph) { this.label.style.display = 'none'; this.onHover?.(-1, 0, 0); return; }
+    if (i < 0 || !this.graph) { this.label.setCssStyles({ display: 'none' }); this.onHover?.(-1, 0, 0); return; }
     this.label.textContent = this.graph.paths[i].replace(/\.md$/i, '');
     this.label.style.display = this.onHover ? 'none' : 'block';
   }
@@ -1500,10 +1499,10 @@ export class PlexusRenderer {
   private labelPos = new THREE.Vector2();
   private placeLabel() {
     if (this.hover < 0) return;
-    if (!this.project(this.hover, this.labelPos)) { this.label.style.display = 'none'; this.onHover?.(-1, 0, 0); return; }
+    if (!this.project(this.hover, this.labelPos)) { this.label.setCssStyles({ display: 'none' }); this.onHover?.(-1, 0, 0); return; }
     // A hover card (if the view provides one) replaces the plain label.
     if (this.onHover) { this.onHover(this.hover, this.labelPos.x, this.labelPos.y); return; }
-    this.label.style.display = 'block';
+    this.label.setCssStyles({ display: 'block' });
     this.label.style.left = `${this.labelPos.x}px`;
     this.label.style.top = `${this.labelPos.y}px`;
   }

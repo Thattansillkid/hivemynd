@@ -1042,7 +1042,7 @@ class LineChart {
     this.canvas = el.createEl('canvas');
     this.tip = el.createDiv({ cls: 'pm-tip' });
     this.canvas.addEventListener('pointermove', (e) => { this.hoverX = e.offsetX; this.draw(this.last); });
-    this.canvas.addEventListener('pointerleave', () => { this.hoverX = null; this.tip.style.display = 'none'; this.draw(this.last); });
+    this.canvas.addEventListener('pointerleave', () => { this.hoverX = null; this.tip.setCssStyles({ display: 'none' }); this.draw(this.last); });
   }
 
   draw(samples: Sample[]) {
@@ -1109,7 +1109,7 @@ class LineChart {
       ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       this.tip.setText(`${clock(best.t)} · ${best.v.toFixed(this.o.digits ?? 0)}${this.o.unit}`);
-      this.tip.style.display = 'block';
+      this.tip.setCssStyles({ display: 'block' });
       this.tip.style.left = `${Math.min(Math.max(bx, 40), w - 40)}px`;
     }
   }
@@ -1132,7 +1132,7 @@ class Lanes {
     this.canvas = el.createEl('canvas');
     this.tip = el.createDiv({ cls: 'pm-tip' });
     this.canvas.addEventListener('pointermove', (e) => { this.hover = { x: e.offsetX, y: e.offsetY }; this.draw(); });
-    this.canvas.addEventListener('pointerleave', () => { this.hover = null; this.tip.style.display = 'none'; this.draw(); });
+    this.canvas.addEventListener('pointerleave', () => { this.hover = null; this.tip.setCssStyles({ display: 'none' }); this.draw(); });
     this.canvas.addEventListener('click', () => {
       const h = this.nearest();
       if (h) this.host.openNote(h.e.notes[0], h.e.agent);
@@ -1173,7 +1173,7 @@ class Lanes {
       ctx.fillStyle = css.dim;
       ctx.font = `13px ${font}`;
       ctx.fillText('No agent has touched a note in the last 30 minutes.', 4, 20);
-      this.tip.style.display = 'none';
+      this.tip.setCssStyles({ display: 'none' });
       return;
     }
 
@@ -1228,11 +1228,11 @@ class Lanes {
       ctx.beginPath(); ctx.arc(hit.x, hit.y, 7, 0, Math.PI * 2); ctx.stroke();
       const what = hit.e.action === 'search' ? `${hit.e.notes.length} notes` : noteTitle(hit.e.notes[0]);
       this.tip.setText(`${hit.e.agent} ${hit.e.action} · ${what} · ${clock(hit.e.t)}`);
-      this.tip.style.display = 'block';
+      this.tip.setCssStyles({ display: 'block' });
       this.tip.style.left = `${Math.min(Math.max(hit.x, 90), w - 90)}px`;
       this.tip.style.top = `${hit.y - 34}px`;
     } else {
-      this.tip.style.display = 'none';
+      this.tip.setCssStyles({ display: 'none' });
     }
   }
 }

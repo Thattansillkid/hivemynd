@@ -28,7 +28,7 @@ export class GrowthBar {
 
   constructor(parent: HTMLElement, private app: App, private host: GrowthHost) {
     this.el = parent.createDiv({ cls: 'plexus-replay plexus-growth' });
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     const controls = this.el.createDiv({ cls: 'plexus-replay-controls' });
     const title = controls.createDiv({ cls: 'plexus-replay-title' });
     setIcon(title.createSpan(), 'sprout');
@@ -74,7 +74,7 @@ export class GrowthBar {
     const n = Math.max(1, born.length - 1);
     born.forEach((b, k) => { rank[b.i] = k / n; });
     r.setGrowth(rank);
-    this.el.style.display = 'block';
+    this.el.setCssStyles({ display: 'block' });
     r.setFeedOffset(this.el.offsetHeight + 24);
     this.seek(0);
     this.playing = false;
@@ -83,7 +83,7 @@ export class GrowthBar {
 
   close() {
     this.stop();
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     const r = this.host.renderer();
     r?.setGrowth(null);
     r?.setFeedOffset(0);

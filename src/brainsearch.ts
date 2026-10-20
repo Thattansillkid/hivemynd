@@ -23,7 +23,7 @@ export class BrainSearch {
 
   constructor(parent: HTMLElement, private app: App, private host: SearchHost) {
     this.el = parent.createDiv({ cls: 'plexus-search' });
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     const row = this.el.createDiv({ cls: 'plexus-search-row' });
     setIcon(row.createSpan({ cls: 'plexus-search-icon' }), 'search');
     this.input = row.createEl('input', { cls: 'plexus-search-input', attr: { type: 'text', placeholder: 'Search notes, #tags, aliases…', spellcheck: 'false' } });
@@ -45,14 +45,14 @@ export class BrainSearch {
 
   show() {
     this.index();
-    this.el.style.display = 'block';
+    this.el.setCssStyles({ display: 'block' });
     this.input.focus();
     this.input.select();
     if (this.input.value) this.run();
   }
 
   close() {
-    this.el.style.display = 'none';
+    this.el.setCssStyles({ display: 'none' });
     this.host.focus(null);
   }
 

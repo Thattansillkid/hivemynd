@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+- Community directory source checks: styles set through Obsidian's setCssStyles, configDir instead of a hard-coded config folder, FileManager.trashFile, window timers.
+- Fix: the optional web viewer failed to load in a plain browser; it now ships the small set of DOM helpers it needs.
+- ESLint with Obsidian's official rules (npx eslint src).
+
 ## 1.0.2
 
 - Release assets carry GitHub build-provenance attestations.
