@@ -1,15 +1,15 @@
-.plexus-view {
-  padding: 0 !important;
+.workspace-leaf-content .view-content.plexus-view {
+  padding: 0;
   position: relative;
   overflow: hidden;
   background: #000;
   outline: none;
 }
-.plexus-view:fullscreen {
-  width: 100vw !important;
-  height: 100vh !important;
-  max-width: none !important;
-  max-height: none !important;
+.workspace-leaf-content .view-content.plexus-view:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
 }
 .plexus-host {
   position: absolute;
@@ -164,7 +164,7 @@
   --pl-text: #e4f8f6;
   --pl-dim: #8fb3b0;
   --pl-faint: #5d7f7c;
-  padding: 0 !important;
+  padding: 0;
   display: flex;
   flex-direction: column;
   background:
@@ -359,7 +359,7 @@
   100% { background: rgba(7, 19, 22, 0.55); box-shadow: none; }
 }
 .plexus-log-time {
-  font-family: var(--font-monospace, ui-monospace, monospace);
+  font-family: var(--font-monospace);
   font-size: 12.5px;
   color: var(--pl-dim);
   font-variant-numeric: tabular-nums;
@@ -465,7 +465,7 @@
    Full-window dashboard. Wide (full screen): system + vitals | log | agents + hot.
    Medium: cards left, log right. Narrow: everything stacked and the page scrolls. */
 .plexus-log { overflow: hidden; }
-.plexus-log:fullscreen { width: 100vw !important; height: 100vh !important; }
+.workspace-leaf-content .view-content.plexus-log:fullscreen { width: 100vw; height: 100vh; }
 .pm-head {
   display: flex;
   align-items: center;
@@ -476,7 +476,7 @@
 }
 .pm-clock {
   margin-left: auto;
-  font-family: var(--font-monospace, ui-monospace, monospace);
+  font-family: var(--font-monospace);
   font-size: 15px;
   color: var(--pl-dim);
   font-variant-numeric: tabular-nums;
@@ -629,7 +629,7 @@
 .pm-lanes {
   position: relative;
   margin: 0 14px 14px;
-  font-family: var(--font-interface, system-ui, sans-serif);
+  font-family: var(--font-interface);
 }
 .pm-hot-list {
   overflow-y: auto;
@@ -881,7 +881,7 @@
   .pm-split { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); overflow-y: auto; }
 }
 .pm-side, .pm-main { min-height: 0; }
-.pm-inline-search { margin: 0 14px 10px; flex: none !important; }
+.plexus-log .pm-inline-search { margin: 0 14px 10px; flex: none; }
 
 .pm-agent-chip {
   display: inline-flex;
@@ -959,7 +959,7 @@
   min-height: 0;
   overflow: auto;
   padding: 8px 0 16px;
-  font-family: var(--font-monospace, ui-monospace, monospace);
+  font-family: var(--font-monospace);
   font-size: 12.5px;
   line-height: 1.55;
 }
@@ -970,7 +970,7 @@
 .pm-dl.is-add { background: rgba(94, 224, 160, 0.09); }
 .pm-dl.is-add .pm-dl-sign, .pm-dl.is-add .pm-dl-text { color: #b8f5d6; }
 .pm-dl.is-del { background: rgba(255, 107, 74, 0.09); }
-.pm-dl.is-del .pm-dl-sign, .pm-dl.is-del .pm-dl-text { color: #ffc2b5; text-decoration: line-through; text-decoration-color: rgba(255, 138, 115, 0.5); }
+.pm-dl.is-del .pm-dl-sign, .pm-dl.is-del .pm-dl-text { color: #ffc2b5; text-decoration-line: line-through; }
 .pm-diff-gap { padding: 4px 0 4px 106px; color: var(--pl-faint); font-style: italic; background: rgba(47, 211, 201, 0.04); }
 
 /* Replay bar (brain view) */
@@ -1124,13 +1124,13 @@
   background: rgba(47, 211, 201, 0.06);
   pointer-events: none;
 }
-.pm-panel-x {
+.plexus-log .pm-panel .pm-panel-x {
   margin-left: auto;
-  background: none !important;
-  border: none !important;
-  box-shadow: none !important;
-  padding: 2px !important;
-  height: auto !important;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+  height: auto;
   color: var(--pl-faint);
   opacity: 0;
   cursor: pointer;
@@ -1153,9 +1153,9 @@
 .pm-dash.is-locked .pm-resize, .pm-dash.is-locked .pm-panel-x { display: none; }
 @container (max-width: 900px) {
   .pm-grid.pm-dash { display: flex; flex-direction: column; }
-  .pm-dash > .pm-panel { min-height: 300px; transform: none !important; }
+  .pm-grid.pm-dash > .pm-panel { min-height: 300px; transform: none; }
   .pm-dash > .pm-log { min-height: 70vh; }
-  .pm-resize, .pm-dash-ghost { display: none !important; }
+  .pm-grid.pm-dash .pm-resize, .pm-grid.pm-dash .pm-dash-ghost { display: none; }
   .pm-dash .pm-drag { cursor: default; }
 }
 
@@ -1244,11 +1244,11 @@
 .plexus-view.is-light { background: #f8f8f7; }
 .plexus-view.is-light .plexus-toolbar .plexus-btn { background: rgba(255, 255, 255, 0.85); border-color: rgba(30, 90, 160, 0.25); color: #1f4f8f; }
 .plexus-view.is-light .plexus-toolbar .plexus-btn:hover { background: #fff; color: #0d2a52; }
-.plexus-view.is-light .pxo-label { color: #111 !important; text-shadow: 0 0 6px rgba(255, 255, 255, 0.95), 0 0 2px #fff !important; }
-.plexus-view.is-light .pxo-sat { text-shadow: 0 0 4px #fff, 0 0 2px #fff, 0 0 1px #fff !important; filter: saturate(1.6) brightness(0.55); }
-.plexus-view.is-light .pxo-feed > * { text-shadow: 0 0 4px #fff, 0 0 2px #fff !important; filter: brightness(0.7) saturate(1.3); }
+.plexus-view.is-light .pxo-label { color: #111; text-shadow: 0 0 6px rgba(255, 255, 255, 0.95), 0 0 2px #fff; }
+.plexus-view.is-light .pxo-sat { text-shadow: 0 0 4px #fff, 0 0 2px #fff, 0 0 1px #fff; filter: saturate(1.6) brightness(0.55); }
+.plexus-view.is-light .pxo-feed > * { text-shadow: 0 0 4px #fff, 0 0 2px #fff; filter: brightness(0.7) saturate(1.3); }
 .plexus-view.is-light .pxo-panel,
-.plexus-view.is-light .plexus-music { background: rgba(255, 255, 255, 0.92) !important; border-color: rgba(30, 90, 160, 0.22) !important; color: #3a5878 !important; box-shadow: 0 6px 24px rgba(20, 50, 90, 0.12); }
+.plexus-view.is-light .plexus-music { background: rgba(255, 255, 255, 0.92); border-color: rgba(30, 90, 160, 0.22); color: #3a5878; box-shadow: 0 6px 24px rgba(20, 50, 90, 0.12); }
 .plexus-view.is-light .plexus-music .pxm-title { color: #1f6fb8; }
 .plexus-view.is-light .plexus-music .pxm-pct { color: #1d3550; }
 .plexus-view.is-light .plexus-music .pxm-track::before { background: rgba(31, 111, 184, 0.14); }
@@ -1337,7 +1337,7 @@
 .plexus-log-entry .plexus-log-purpose { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .plexus-log-entry:hover .plexus-log-purpose { -webkit-line-clamp: unset; }
 /* Obsidian's view-content rule sets its own background colour; light mode overrides it. */
-.plexus-log.is-light { background-color: var(--pl-bg) !important; }
+body .workspace .workspace-leaf-content .view-content.plexus-log.is-light { background-color: var(--pl-bg); }
 .plexus-log.is-light .plexus-log-chip,
 .plexus-log.is-light .plexus-log-seg button,
 .plexus-log.is-light .pm-btn,
@@ -1419,20 +1419,20 @@ body.plexus-light-window .view-header { border-bottom: 1px solid rgba(15, 37, 64
 .pxo-label {
   position: absolute; pointer-events: none; display: none; z-index: 2; white-space: nowrap;
   transform: translate(14px, -50%);
-  font: 12px/1.2 var(--font-interface, system-ui, sans-serif);
+  font: 12px/1.2 var(--font-interface);
   color: #e6fffd; text-shadow: 0 0 8px rgba(47, 211, 201, .9), 0 0 2px #000;
 }
 .pxo-feed {
   position: absolute; left: 18px; bottom: 16px; z-index: 2; pointer-events: none;
   display: flex; flex-direction: column; gap: 4px;
-  font: 11px/1.35 var(--font-monospace, ui-monospace, monospace); letter-spacing: .04em;
+  font: 11px/1.35 var(--font-monospace); letter-spacing: .04em;
 }
 .pxo-feed-row { color: var(--agent, #fff); text-shadow: 0 0 10px var(--agent, #fff), 0 0 2px #000; opacity: 0; }
 .pxo-panel {
   position: absolute; right: 18px; bottom: 16px; z-index: 2; pointer-events: none; display: none;
   min-width: 230px; padding: 10px 14px; border-radius: 10px;
   background: rgba(3, 10, 12, .78); border: 1px solid rgba(47, 211, 201, .25);
-  font: 12px/1.4 var(--font-interface, system-ui, sans-serif); color: #e4f8f6;
+  font: 12px/1.4 var(--font-interface); color: #e4f8f6;
 }
 .pxo-legend-title { font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; color: #2fd3c9; margin-bottom: 6px; }
 .pxo-legend-bar { height: 8px; border-radius: 4px; background: linear-gradient(90deg, #0a2b2c 0%, #1b6f6a 35%, #2fd3c9 55%, #ffd27a 100%); }
@@ -1441,14 +1441,14 @@ body.plexus-light-window .view-header { border-bottom: 1px solid rgba(15, 37, 64
 .pxo-sat {
   position: absolute; pointer-events: none; z-index: 2; white-space: nowrap;
   transform: translate(-50%, 14px);
-  font: 600 11px/1 var(--font-interface, system-ui, sans-serif); letter-spacing: .06em; text-transform: uppercase;
+  font: 600 11px/1 var(--font-interface); letter-spacing: .06em; text-transform: uppercase;
   color: var(--agent, #fff); text-shadow: 0 0 8px var(--agent, #fff), 0 0 2px #000;
 }
 .plexus-music {
   position: absolute; right: 18px; top: 52px; z-index: 3; pointer-events: auto; width: 230px;
   padding: 9px 11px; border-radius: 10px;
   background: rgba(3, 10, 12, .82); border: 1px solid rgba(47, 211, 201, .25);
-  font: 11px/1.3 var(--font-interface, system-ui, sans-serif); color: #8fb3b0;
+  font: 11px/1.3 var(--font-interface); color: #8fb3b0;
 }
 .plexus-view.is-light .pxo-feed-row { text-shadow: 0 0 4px #fff, 0 0 2px #fff; filter: brightness(0.7) saturate(1.3); }
 
@@ -1460,3 +1460,5 @@ body.plexus-light-window .view-header { border-bottom: 1px solid rgba(15, 37, 64
 /* First-run welcome */
 .plexus-welcome ul { padding-left: 1.2em; }
 .plexus-welcome li { margin: 4px 0; }
+
+.workspace-leaf-content .view-content.plexus-log { padding: 0; }

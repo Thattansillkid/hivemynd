@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Release assets carry GitHub build-provenance attestations.
+- Stylesheet cleanup for the community directory checks (no !important, Obsidian font variables).
+
 ## 1.0.1
 
 - README title now matches the plugin name (community directory check).
