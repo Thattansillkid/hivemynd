@@ -167,7 +167,7 @@ Plays your vault's history: notes appear in the order they were created, so you 
 
 ### Themes
 
-Click the **palette** button. It has five groups: **Colors** (the themes below), **Shapes** (the outline of the brain), **Agent orbit** (how the agents circle it), **Orbit line color** and **Shape cycle**, plus **Clustering…**. Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
+Click the **palette** button. At the top is **Randomize** (below). Then come five groups: **Colors** (the themes below), **Shapes** (the outline of the brain), **Agent orbit** (how the agents circle it), **Orbit line color** and **Shape cycle**, plus **Clustering…**. Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen. Changing colours or orbits by hand cross-fades from the old look to the new one instead of switching at once.
 
 | Theme | Look |
 |---|---|
@@ -204,6 +204,16 @@ The colours you pick under Settings → Look apply to Multiverse; the other them
 ### Shape cycle
 
 **Palette → Shape cycle** morphs the brain to the next shape automatically: every 30 seconds, 1 minute, 5 minutes or 10 minutes. Choose **Off** to stay on one shape.
+
+### Randomize
+
+**Palette → Randomize** changes the whole look on a timer: colour theme, shape, agent orbit, orbit line colour and clustering are each picked at random.
+
+- **On** / **Off** starts and stops it. Turning it on shuffles once straight away.
+- **Every 30 seconds**, **1 minute**, **5 minutes** or **10 minutes** sets how often it changes.
+- **Shuffle now** picks a new look once, whether Randomize is on or off.
+
+Each change is a morph, not a jump: the shape and clustering glide into place while the old colours and orbits fade out over the new ones (about a second and a half). Randomize and Shape cycle don't run together; turning one on turns the other off. Like every look setting, it doesn't change your notes, links or layout.
 
 ### Agent orbit
 
