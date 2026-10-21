@@ -178,6 +178,7 @@ Click the **palette** button. It has four groups: **Colors** (the themes below),
 | **Copper Ember** | Sand-coloured notes on warm brown, with copper sparks. Grounded and earthy. |
 | **Aurora Moss** | Lime notes on deep forest green, with pink sparks. Like bioluminescence. |
 | **Lifeblood** | Arteries and veins: red arteries and darker veins wind between red notes, and blood pumps through them on a heartbeat. |
+| **Matrix** | Green code rain falls behind the brain; notes are softly glowing code glyphs, and data packets stream along thin green links. |
 | **Solar Ink** | Coral and gold on indigo. Bold, for demos. |
 
 The colours you pick under Settings → Look apply to Multiverse; the other themes bring their own. **Mycelium** draws links as fine wavy fungal threads (signals still travel along them) and notes as small dew drops.
