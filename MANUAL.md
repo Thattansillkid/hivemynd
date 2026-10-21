@@ -69,7 +69,7 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
 | Eye in a frame | Focus on a project folder | `Esc` leaves |
-| Palette | Theme menu: colours, shapes, agent orbit, shape cycle and clustering | |
+| Palette | Theme menu: colours, shapes, agent orbit, orbit line colour, shape cycle and clustering | |
 | Pulse line | Brain Monitor in its own window | |
 
 ### Keyboard (with the brain focused)
@@ -167,7 +167,7 @@ Plays your vault's history: notes appear in the order they were created, so you 
 
 ### Themes
 
-Click the **palette** button. It has four groups: **Colors** (the themes below), **Shapes** (the outline of the brain), **Agent orbit** (how the agents circle it) and **Shape cycle**, plus **Clustering…**. Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
+Click the **palette** button. It has five groups: **Colors** (the themes below), **Shapes** (the outline of the brain), **Agent orbit** (how the agents circle it), **Orbit line color** and **Shape cycle**, plus **Clustering…**. Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
 
 | Theme | Look |
 |---|---|
@@ -219,6 +219,8 @@ The colours you pick under Settings → Look apply to Multiverse; the other them
 | **Parked** | Agents hold still around the brain |
 
 Lightning, message arcs and agent labels follow the agents in every orbit.
+
+**Palette → Orbit line color** sets the colour of the orbit paths (Solar system and Atom): **Default** uses each agent's own colour; or pick White, Red, Orange, Yellow, Green, Teal, Blue, Purple, Pink or Gold, or **Rainbow**, where colours flow slowly around each ring.
 
 ### Clustering
 
