@@ -69,7 +69,7 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
 | Eye in a frame | Focus on a project folder | `Esc` leaves |
-| Palette | Theme menu | |
+| Palette | Theme menu: colours and shapes | |
 | Pulse line | Brain Monitor in its own window | |
 
 ### Keyboard (with the brain focused)
@@ -167,7 +167,7 @@ Plays your vault's history: notes appear in the order they were created, so you 
 
 ### Themes
 
-Click the **palette** button and choose a theme. It changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ.
+Click the **palette** button. It has two groups: **Colors** (the themes below) and **Shapes** (the outline of the brain). Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
 
 | Theme | Look |
 |---|---|
@@ -179,7 +179,25 @@ Click the **palette** button and choose a theme. It changes every open brain vie
 | **Aurora Moss** | Lime notes on deep forest green, with pink sparks. Like bioluminescence. |
 | **Solar Ink** | Coral and gold on indigo. Bold, for demos. |
 
-The colours you pick under Settings → Look apply to Multiverse; the other themes bring their own.
+The colours you pick under Settings → Look apply to Multiverse; the other themes bring their own. **Mycelium** draws links as fine wavy fungal threads (signals still travel along them) and notes as small dew drops.
+
+### Shapes
+
+**Palette → Shapes** reshapes the whole brain. It is a look only: every note keeps its links, and notes that sit near each other stay near each other. Your saved layout isn't changed. Switching morphs smoothly from one shape to the next.
+
+| Shape | Look |
+|---|---|
+| **Default** | The brain as its links arrange it |
+| **Sphere** | A perfect orb |
+| **Diamond** | A tall four-sided diamond |
+| **Pyramid** | A square pyramid |
+| **Cube** | A solid block |
+| **Ring** | A torus (a donut) |
+| **Galaxy** | A flat disc with two spiral arms and a bright core |
+| **Double helix** | Two intertwined strands, like DNA |
+| **Heart** | A 3D heart |
+| **Star** | A spiky star with twelve points |
+| **Cerebrum** | Two hemispheres, like a real brain |
 
 ### Focus mode
 
