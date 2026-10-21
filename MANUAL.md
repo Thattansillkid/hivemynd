@@ -20,7 +20,7 @@ This manual is also built into the plugin: open the command palette and run **Hi
 10. [Watchlist and alerts](#10-watchlist-and-alerts)
 11. [Reports, logs and context packs](#11-reports-logs-and-context-packs)
 12. [Music reactivity](#12-music-reactivity)
-13. [Web viewer](#13-web-viewer)
+13. [Web viewer and Even G2 glasses](#13-web-viewer-and-even-g2-glasses)
 14. [Agent API reference](#14-agent-api-reference)
 15. [Files, network and privacy](#15-files-network-and-privacy)
 16. [Troubleshooting](#16-troubleshooting)
@@ -68,7 +68,9 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Magnifier | Search the brain | `/` or `Ctrl+F` |
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
-| Sun or moon | Light or dark theme | |
+| Eye in a frame | Focus on a project folder | `Esc` leaves |
+| Microphone | Ask the vault | `V` |
+| Palette | Theme menu | |
 | Pulse line | Brain Monitor in its own window | |
 
 ### Keyboard (with the brain focused)
@@ -82,8 +84,9 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | `G` | Vault growth time-lapse |
 | `S` | Meaning map |
 | `M` | Music reactivity |
+| `V` | Ask the vault (voice, or typed) |
 | `/` or `Ctrl+F` | Search |
-| `Esc` | Close search or a menu; stop spanning monitors |
+| `Esc` | Close search or a menu; leave focus mode; stop spanning monitors |
 
 ### Command palette
 
@@ -97,6 +100,9 @@ Press `Ctrl+P` (`Cmd+P` on a Mac) and type "Hivemynd":
 - Toggle music reactivity
 - Toggle meaning map (arrange by topic)
 - Toggle cinematic camera
+- Toggle low-latency mode
+- Focus the brain on a project (folder)
+- Ask the vault (voice)
 - Play vault growth time-lapse
 - Demo agent activity
 - Turn agent permissions on or off
@@ -112,7 +118,9 @@ Settings → **H!V3MYND**. The sections, top to bottom:
 | Notes | Folders to leave out of the brain |
 | Access log | Logging searches, storing agent prompts, the daily digest note, the daily brain report |
 | Cinematic camera | Start when the brain opens, resume after idle, flight speed |
-| Agent teamwork | Claims, claim length, handoffs, trust warnings, gap notes folder |
+| Agent teamwork | Claims, claim length, handoffs, trust warnings, gap notes folder, live presence rings, secret scanner |
+| Performance and voice | Low-latency mode, speaking answers aloud |
+| Even G2 glasses | Sending short lines to your glasses through the Agent Bridge |
 | Daily brief | Brief on or off, the hour it is written, folder, time-lapse, how long to keep videos |
 | Music reactivity | Audio input, bass cutoff, sensitivity, palette, strength, sync delay |
 | Agent permissions | The bridge policy file, enforcing rules, default PC control, per-agent hidden folders and read-only |
@@ -154,15 +162,43 @@ Lays the brain out by topic instead of by links, so notes about similar things s
 
 ### Replay (`R`)
 
-A bar appears at the bottom. Choose a range (1 hour, 6 hours, 24 hours or 7 days), drag the playhead to any moment, or press play at 1× to 1200× speed. The brain shows agent activity as it happened.
+A bar appears at the bottom. Choose a range (1 hour, 6 hours, 24 hours, 7 days, or **Pick a day** with a date), drag the playhead to any moment, or press play at 1× to 1200× speed. The brain shows agent activity as it happened. The agent menu narrows the replay to one agent, so you can watch everything a single agent did on a given day.
 
 ### Vault growth (`G`)
 
 Plays your vault's history: notes appear in the order they were created, so you can watch the brain grow.
 
-### Light and dark
+### Themes
 
-The sun and moon button switches the brain between dark (glowing on black) and light (ink on paper). It switches every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme button.
+Click the **palette** button and choose a theme. It changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ.
+
+| Theme | Look |
+|---|---|
+| **Multiverse** | Glowing glass on black. Close up, every note becomes a slowly turning galaxy. |
+| **Inkblot** | Ink on paper. Notes are small oil blobs that wobble and change shape, with a glint and an oil-slick edge. |
+| **Violet Dusk** | Lilac notes on a dim blue-grey room. Calm, for late-night work. |
+| **Tide Pulse** | Aqua notes on charcoal. Clean and technical, a good everyday choice. |
+| **Copper Ember** | Sand-coloured notes on warm brown, with copper sparks. Grounded and earthy. |
+| **Aurora Moss** | Lime notes on deep forest green, with pink sparks. Like bioluminescence. |
+| **Solar Ink** | Coral and gold on indigo. Bold, for demos. |
+
+The colours you pick under Settings → Look apply to Multiverse; the other themes bring their own.
+
+### Focus mode
+
+Click the **eye in a frame** button, or right-click a folder and choose **Focus the brain on this folder**, to dim everything except one project: the notes in that folder and the notes they link to. Press `Esc` or the button again to leave.
+
+### Ask the vault (`V`)
+
+Click the **microphone** or press `V`, then ask a question out loud. If voice input isn't available on your computer, a box opens for you to type it instead. Hivemynd finds the notes that best answer it, lights them in the brain, shows the best passage, and reads it aloud (turn that off with **Speak answers**). Everything runs on your computer; nothing is sent anywhere.
+
+### Who wrote this note
+
+The status bar at the bottom of Obsidian shows how much of the open note agents wrote, and its trust score, for example "🤖 35% agent-written · trust 82". Click it for the breakdown by agent. Hover cards in the brain show the same line. Lines count as an agent's when that agent's recorded edit added them.
+
+### Low-latency mode
+
+For slower computers: Settings → **Performance and voice → Low-latency mode**, or the command **Toggle low-latency mode**. It turns off glow, depth of field, the background haze, sparks, the close-up galaxies and the daily brief's time-lapse, and draws at one pixel per screen pixel.
 
 ### Full screen (`F`)
 
@@ -252,7 +288,7 @@ Agent names are free-form: lowercase letters, digits, `-` and `_`. Set each agen
 
 The Brain Monitor is a dashboard of what your agents are doing. Open it from the ribbon, the brain toolbar or the command palette. It normally opens in its own window, so you can put it on another monitor or make it full screen (`F`).
 
-Header buttons: light or dark theme, **Panels** (show, hide, lock or reset the layout), open in its own window, and full screen.
+Header buttons: **Theme** (the same themes as the brain, chosen separately), **Panels** (show, hide, lock or reset the layout), open in its own window, and full screen.
 
 ### Overview
 
@@ -281,7 +317,7 @@ Agent work grouped by task: what each agent was asked, which notes it read and w
 
 ### Team
 
-Claims, handoffs and the daily brief. See [section 8](#8-agent-teamwork).
+Claims, handoffs, tasks for agents and the daily brief. See [section 8](#8-agent-teamwork).
 
 ### Gaps
 
@@ -345,7 +381,29 @@ The gap radar ranks what your vault is missing by how much agent time it cost th
 - **Missing:** searches that kept coming back empty.
 - **Thin:** short notes agents kept opening, and notes agents keep returning to.
 
-The top five are at the top of **Brain Monitor → Gaps**. Thin notes show as faint dashed outlines in the brain. For a missing topic, **Draft starter note** creates a note in your gap folder (default `H!V3MYND/Gaps`) that records what agents were looking for and related notes, ready for you or an agent to fill in. Agents can read the radar with `GET /gaps`.
+The top five are at the top of **Brain Monitor → Gaps**. Thin notes show as faint dashed outlines in the brain. For a missing topic, **Draft starter note** creates a note in your gap folder (default `H!V3MYND/Gaps`) that records what agents were looking for and related notes, ready for you or an agent to fill in. **Make task** turns the gap into a task agents can claim (below). Agents can read the radar with `GET /gaps`.
+
+### Tasks for agents
+
+**Brain Monitor → Team → Tasks for agents** lists work agents can pick up:
+
+- Tasks you make from the gap radar are ready at once.
+- An agent can propose a task (`POST /tasks`). It waits for your **Approve**.
+- An agent claims an open task (`POST /tasks/claim`), which also claims its note, and marks it done (`POST /tasks/done`) with a short result.
+
+### Live presence
+
+Besides claimed notes, the note each active agent is working on right now wears a ring in that agent's colour, so you can see who is where at a glance. Turn it off with **Live presence rings**.
+
+### Secret scanner
+
+Hivemynd watches for API keys, tokens and private keys in what agents write:
+
+- **Before an edit** (agents with the pre-write hook): the agent is told the edit contains a key or token and asked to write `[REDACTED]` instead. Warn (default) lets a retry through; Block holds it back.
+- **After an edit:** with **Mask secrets agents write** on, a key that still lands in a note is replaced with a short masked stub like `sk-a…[masked by H!V3MYND]`. This is recorded in Brain Monitor → Changes, so you can undo it if the value was meant to be there.
+- Keys are also masked before Hivemynd stores agent prompts, bridge messages and task details.
+
+Placeholders such as `your-api-key` or `sk-xxxx` are left alone.
 
 ### Daily brief
 
@@ -399,9 +457,20 @@ A small panel on the brain has sliders for bass, mids and highs, a kick-sensitiv
 
 Audio is analysed on your computer. Nothing is recorded or sent.
 
-## 13. Web viewer
+## 13. Web viewer and Even G2 glasses
+
+### Web viewer
 
 Off by default. It serves a read-only view of the brain to other devices, such as a tablet or a TV: note names and links, never note contents, with live agent activity. Turn it on in **Settings → Web viewer**, then open the **Viewer link** on the other device. Reaching it from other devices on your network is a separate opt-in.
+
+### Even G2 glasses
+
+Hivemynd can put short lines on Even Realities G2 glasses: the daily brief's summary, answers from **Ask the vault**, and approval requests from agents.
+
+- **Any glasses app** can read the current lines from `GET /hud`: which agent is on which note, claims, tasks waiting for approval, and the last answer.
+- **Through the Agent Bridge:** turn on **Settings → Even G2 glasses → Send to glasses**, and set the bridge address, the bridge's token file, and the sender and glasses agent names. The sender's token is read from the token file each time a line is sent and is never stored in Hivemynd. **Test** sends a sample line.
+
+It is off by default, so nothing piles up before your glasses are connected.
 
 ## 14. Agent API reference
 
@@ -431,6 +500,19 @@ Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemy
 | `GET /handoffs` | | Recent handoffs |
 | `GET /gaps` | | The gap radar and least trusted notes |
 | `POST /brief/now` | `{"day?":"YYYY-MM-DD","timelapse?":true}` | Writes a daily brief and returns its path |
+| `GET /tasks` | | Tasks for agents (proposed, open, claimed, and done today) |
+| `POST /tasks` | `{"agent","title","detail?","path?"}` | Proposes a task; it waits for your approval |
+| `POST /tasks/claim` | `{"agent","id"}` | Claims an open task (and its note) |
+| `POST /tasks/done` | `{"agent","id","result?"}` | Marks a task done |
+| `POST /tasks/withdraw` | `{"agent","id"}` | Takes back a task the agent proposed, while it still waits for approval |
+| `GET /authorship?path=` | | How many of the note's lines agents wrote, by agent |
+
+### Answers and heads-up display
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /ask?q=` | | `{"q","answer","notes"}`: the best passage from your vault and the notes it came from |
+| `GET /hud` | | `{"lines"}`: short status lines for glasses or other small screens |
 
 ### Monitors and approvals
 
@@ -482,6 +564,12 @@ If you sync your vault's `.obsidian` folder, the access log syncs with it.
 **Spanning monitors doesn't line up.** Check the monitor arrangement in your operating system's display settings. Hivemynd follows it exactly. Monitors with different scaling may show small offsets at the edges.
 
 **The cinematic camera keeps starting.** Open the clapperboard menu and set **Start by itself after** to **Off**.
+
+**The brain is slow or the fan spins up.** Turn on **Low-latency mode** (Settings → Performance and voice).
+
+**The microphone opens a typing box instead of listening.** Voice input isn't available in this Obsidian build on your computer. Type the question; the answer is the same, and it can still be read aloud.
+
+**A key I meant to keep was masked.** Open Brain Monitor → Changes, find the "Masked … secret" entry and restore it. To stop masking, turn off **Mask secrets agents write**.
 
 **Something else.** Open an issue on the GitHub repository with what you did, what you expected, and what happened. Please leave out your keys and note contents.
 
