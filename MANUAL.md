@@ -69,7 +69,7 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
 | Eye in a frame | Focus on a project folder | `Esc` leaves |
-| Palette | Theme menu: colours, shapes and clustering | |
+| Palette | Theme menu: colours, shapes, agent orbit, shape cycle and clustering | |
 | Pulse line | Brain Monitor in its own window | |
 
 ### Keyboard (with the brain focused)
@@ -167,7 +167,7 @@ Plays your vault's history: notes appear in the order they were created, so you 
 
 ### Themes
 
-Click the **palette** button. It has two groups: **Colors** (the themes below) and **Shapes** (the outline of the brain). Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
+Click the **palette** button. It has four groups: **Colors** (the themes below), **Shapes** (the outline of the brain), **Agent orbit** (how the agents circle it) and **Shape cycle**, plus **Clustering…**. Your choice changes every open brain view at once, including all monitors while spanning. The Brain Monitor has its own theme menu, so the two can differ. Both menus work in full screen.
 
 | Theme | Look |
 |---|---|
@@ -177,6 +177,7 @@ Click the **palette** button. It has two groups: **Colors** (the themes below) a
 | **Tide Pulse** | Aqua notes on charcoal. Clean and technical, a good everyday choice. |
 | **Copper Ember** | Sand-coloured notes on warm brown, with copper sparks. Grounded and earthy. |
 | **Aurora Moss** | Lime notes on deep forest green, with pink sparks. Like bioluminescence. |
+| **Lifeblood** | Arteries and veins: red arteries and darker veins wind between red notes, and blood pumps through them on a heartbeat. |
 | **Solar Ink** | Coral and gold on indigo. Bold, for demos. |
 
 The colours you pick under Settings → Look apply to Multiverse; the other themes bring their own. **Mycelium** draws links as fine wavy fungal threads (signals still travel along them) and notes as small dew drops.
@@ -198,6 +199,25 @@ The colours you pick under Settings → Look apply to Multiverse; the other them
 | **Heart** | A 3D heart |
 | **Star** | A spiky star with twelve points |
 | **Cerebrum** | Two hemispheres, like a real brain |
+
+### Shape cycle
+
+**Palette → Shape cycle** morphs the brain to the next shape automatically: every 30 seconds, 1 minute, 5 minutes or 10 minutes. Choose **Off** to stay on one shape.
+
+### Agent orbit
+
+**Palette → Agent orbit** changes how the agents' satellites circle the brain, like planets around a star:
+
+| Orbit | Look |
+|---|---|
+| **Default** | One shared ring, turning slowly |
+| **Solar system** | Each agent on its own ring; outer agents move slower, like real planets. Orbit paths are drawn. |
+| **Atom** | Fast orbits on crossing, tilted planes, like electrons. Orbit paths are drawn. |
+| **Close orbit** | Agents skim just above the brain |
+| **Wide orbit** | Agents circle far out |
+| **Parked** | Agents hold still around the brain |
+
+Lightning, message arcs and agent labels follow the agents in every orbit.
 
 ### Clustering
 
