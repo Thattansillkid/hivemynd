@@ -69,7 +69,7 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
 | Eye in a frame | Focus on a project folder | `Esc` leaves |
-| Palette | Theme menu: colours and shapes | |
+| Palette | Theme menu: colours, shapes and clustering | |
 | Pulse line | Brain Monitor in its own window | |
 
 ### Keyboard (with the brain focused)
@@ -198,6 +198,10 @@ The colours you pick under Settings → Look apply to Multiverse; the other them
 | **Heart** | A 3D heart |
 | **Star** | A spiky star with twelve points |
 | **Cerebrum** | Two hemispheres, like a real brain |
+
+### Clustering
+
+**Palette → Clustering…** opens a slider from **Spread** to **Tight**. Toward Tight, each note is drawn toward the notes it links to, so related notes gather into knots. Toward Spread, they loosen apart. The middle is the brain as laid out; double-click the slider to reset. It works with every shape and colour, changes the look only, and is remembered.
 
 ### Focus mode
 
