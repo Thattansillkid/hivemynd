@@ -501,7 +501,7 @@ Claims and trust warnings (section 8) are coordination aids, not security. Agent
 
 Off by default. Turn it on with the music button or `M`. The brain swells on bass and kick drums, and mids and highs fire coloured signals along the links.
 
-A small panel on the brain has sliders for bass, mids and highs, a kick-sensitivity slider, an audio-source picker and a **Color** menu for the light show: **Default** (multicolour), one of White, Red, Orange, Yellow, Green, Teal, Blue, Purple, Pink or Gold, or **Rainbow**. **Find sound** listens to every source and picks the one that is playing. Close the panel with its **×**; the music keeps driving the brain. Click the music button (or press `M`) to bring the panel back, and again to turn music off. In Settings you can change the bass cutoff, sensitivity, palette, strength, and a sync delay for Bluetooth headphones.
+A small panel on the brain has sliders for bass, mids and highs, a kick-sensitivity slider, an audio-source picker and a **Color** menu for the light show: **Default** (multicolour), one of White, Red, Orange, Yellow, Green, Teal, Blue, Purple, Pink or Gold, or **Rainbow**. **Find sound** listens to every source and picks the one that is playing. Close the panel with its **×**; the music keeps driving the brain. Click the music button (or press `M`) to bring the panel back, and again to turn music off. While the brain spans several monitors, the panel appears only on the centre monitor. In Settings you can change the bass cutoff, sensitivity, palette, strength, and a sync delay for Bluetooth headphones.
 
 Audio is analysed on your computer. Nothing is recorded or sent.
 
