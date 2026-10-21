@@ -69,7 +69,6 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | Clapperboard | Cinematic camera menu | `C` starts and stops |
 | Monitor | Span across monitors menu | |
 | Eye in a frame | Focus on a project folder | `Esc` leaves |
-| Microphone | Ask the vault | `V` |
 | Palette | Theme menu | |
 | Pulse line | Brain Monitor in its own window | |
 
@@ -84,7 +83,6 @@ The toolbar fades when the pointer is elsewhere and comes back when you move ove
 | `G` | Vault growth time-lapse |
 | `S` | Meaning map |
 | `M` | Music reactivity |
-| `V` | Ask the vault (voice, or typed) |
 | `/` or `Ctrl+F` | Search |
 | `Esc` | Close search or a menu; leave focus mode; stop spanning monitors |
 
@@ -102,7 +100,6 @@ Press `Ctrl+P` (`Cmd+P` on a Mac) and type "Hivemynd":
 - Toggle cinematic camera
 - Toggle low-latency mode
 - Focus the brain on a project (folder)
-- Ask the vault (voice)
 - Play vault growth time-lapse
 - Demo agent activity
 - Turn agent permissions on or off
@@ -119,7 +116,7 @@ Settings → **H!V3MYND**. The sections, top to bottom:
 | Access log | Logging searches, storing agent prompts, the daily digest note, the daily brain report |
 | Cinematic camera | Start when the brain opens, resume after idle, flight speed |
 | Agent teamwork | Claims, claim length, handoffs, trust warnings, gap notes folder, live presence rings, secret scanner |
-| Performance and voice | Low-latency mode, speaking answers aloud |
+| Performance | Low-latency mode |
 | Even G2 glasses | Sending short lines to your glasses through the Agent Bridge |
 | Daily brief | Brief on or off, the hour it is written, folder, time-lapse, how long to keep videos |
 | Music reactivity | Audio input, bass cutoff, sensitivity, palette, strength, sync delay |
@@ -188,17 +185,13 @@ The colours you pick under Settings → Look apply to Multiverse; the other them
 
 Click the **eye in a frame** button, or right-click a folder and choose **Focus the brain on this folder**, to dim everything except one project: the notes in that folder and the notes they link to. Press `Esc` or the button again to leave.
 
-### Ask the vault (`V`)
-
-Click the **microphone** or press `V`, then ask a question out loud. If voice input isn't available on your computer, a box opens for you to type it instead. Hivemynd finds the notes that best answer it, lights them in the brain, shows the best passage, and reads it aloud (turn that off with **Speak answers**). Everything runs on your computer; nothing is sent anywhere.
-
 ### Who wrote this note
 
 The status bar at the bottom of Obsidian shows how much of the open note agents wrote, and its trust score, for example "🤖 35% agent-written · trust 82". Click it for the breakdown by agent. Hover cards in the brain show the same line. Lines count as an agent's when that agent's recorded edit added them.
 
 ### Low-latency mode
 
-For slower computers: Settings → **Performance and voice → Low-latency mode**, or the command **Toggle low-latency mode**. It turns off glow, depth of field, the background haze, sparks, the close-up galaxies and the daily brief's time-lapse, and draws at one pixel per screen pixel.
+For slower computers: Settings → **Performance → Low-latency mode**, or the command **Toggle low-latency mode**. It turns off glow, depth of field, the background haze, sparks, the close-up galaxies and the daily brief's time-lapse, and draws at one pixel per screen pixel.
 
 ### Full screen (`F`)
 
@@ -465,9 +458,9 @@ Off by default. It serves a read-only view of the brain to other devices, such a
 
 ### Even G2 glasses
 
-Hivemynd can put short lines on Even Realities G2 glasses: the daily brief's summary, answers from **Ask the vault**, and approval requests from agents.
+Hivemynd can put short lines on Even Realities G2 glasses: the daily brief's summary and approval requests from agents.
 
-- **Any glasses app** can read the current lines from `GET /hud`: which agent is on which note, claims, tasks waiting for approval, and the last answer.
+- **Any glasses app** can read the current lines from `GET /hud`: which agent is on which note, claims, and tasks waiting for approval.
 - **Through the Agent Bridge:** turn on **Settings → Even G2 glasses → Send to glasses**, and set the bridge address, the bridge's token file, and the sender and glasses agent names. The sender's token is read from the token file each time a line is sent and is never stored in Hivemynd. **Test** sends a sample line.
 
 It is off by default, so nothing piles up before your glasses are connected.
@@ -507,11 +500,10 @@ Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemy
 | `POST /tasks/withdraw` | `{"agent","id"}` | Takes back a task the agent proposed, while it still waits for approval |
 | `GET /authorship?path=` | | How many of the note's lines agents wrote, by agent |
 
-### Answers and heads-up display
+### Heads-up display
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `GET /ask?q=` | | `{"q","answer","notes"}`: the best passage from your vault and the notes it came from |
 | `GET /hud` | | `{"lines"}`: short status lines for glasses or other small screens |
 
 ### Monitors and approvals
@@ -565,9 +557,7 @@ If you sync your vault's `.obsidian` folder, the access log syncs with it.
 
 **The cinematic camera keeps starting.** Open the clapperboard menu and set **Start by itself after** to **Off**.
 
-**The brain is slow or the fan spins up.** Turn on **Low-latency mode** (Settings → Performance and voice).
-
-**The microphone opens a typing box instead of listening.** Voice input isn't available in this Obsidian build on your computer. Type the question; the answer is the same, and it can still be read aloud.
+**The brain is slow or the fan spins up.** Turn on **Low-latency mode** (Settings → Performance).
 
 **A key I meant to keep was masked.** Open Brain Monitor → Changes, find the "Masked … secret" entry and restore it. To stop masking, turn off **Mask secrets agents write**.
 
