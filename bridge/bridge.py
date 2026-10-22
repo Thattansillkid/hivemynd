@@ -30,7 +30,11 @@ from pydantic import BaseModel, Field
 
 HERE = Path(__file__).resolve().parent
 CONFIG = Path(os.environ.get("HIVEMYND_BRIDGE_CONFIG", HERE / "config.json"))
-KEY_FILE = Path(os.environ.get("HIVEMYND_KEY_FILE", Path.home() / ".hivemynd" / "listener.key"))
+# The H!V3MYND listener key. Since plugin 1.2 each vault saves a Bridge key under
+# ~/.hivemynd/vaults/<vault>/ (its path is shown in the plugin settings); point
+# HIVEMYND_KEY_FILE or "plugin_key_file" in config.json at it. The 1.1 shared file
+# below is only a fallback while the shared key is still accepted.
+LEGACY_KEY_FILE = Path.home() / ".hivemynd" / "listener.key"
 MAX_BYTES = 5 * 1024 * 1024
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 PROTECTED = (".obsidian", ".trash", ".git")  # plugin code and settings, deleted notes, history
@@ -58,9 +62,17 @@ def token_hash(token: str) -> str:
 
 # --------------------------------------------------------------------------- plugin link
 
+def plugin_key_file() -> Path:
+    env = os.environ.get("HIVEMYND_KEY_FILE")
+    if env:
+        return Path(env)
+    configured = load_config().get("plugin_key_file")
+    return Path(configured) if configured else LEGACY_KEY_FILE
+
+
 def plugin_key() -> str:
     try:
-        return KEY_FILE.read_text(encoding="utf-8").strip()
+        return plugin_key_file().read_text(encoding="utf-8").strip()
     except OSError:
         return ""
 
@@ -257,6 +269,7 @@ def main() -> None:
     i = sub.add_parser("init", help="create config.json")
     i.add_argument("--vault", required=True)
     i.add_argument("--policy-file", default="", help="agent_policies.json written by the plugin (optional)")
+    i.add_argument("--key-file", default="", help="the Bridge key file shown in the plugin settings (optional)")
     a = sub.add_parser("add-agent", help="create an agent and print its token")
     a.add_argument("name")
     r = sub.add_parser("remove-agent", help="revoke an agent's token")
@@ -270,7 +283,8 @@ def main() -> None:
         vault = Path(args.vault).expanduser().resolve()
         if not (vault / ".obsidian").is_dir():
             raise SystemExit(f"{vault} doesn't look like an Obsidian vault (no .obsidian folder)")
-        save_config({"vault": str(vault), "policy_file": args.policy_file, "plugin_url": "http://127.0.0.1:27183", "agents": {}})
+        save_config({"vault": str(vault), "policy_file": args.policy_file, "plugin_key_file": args.key_file,
+                     "plugin_url": "http://127.0.0.1:27183", "agents": {}})
         print(f"Wrote {CONFIG}. Next: python bridge.py add-agent <name>")
     elif args.cmd == "add-agent":
         if not NAME_RE.match(args.name):

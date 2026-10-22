@@ -1,3 +1,5 @@
+import { nvidiaSmiPath } from './trustedexec';
+
 // Samples system and brain health once a second for the Brain Monitor window.
 // CPU and RAM come from Node's os module; the GPU from a single long-running
 // `nvidia-smi` stream (no per-sample process spawn). Runs only while a monitor
@@ -78,7 +80,11 @@ export class Monitor {
     const cp = (window as any).require?.('child_process');
     if (!cp) { this.gpuStatus = 'unavailable'; return; }
     try {
-      const smi = cp.spawn('nvidia-smi', [
+      const fs = (window as any).require('fs');
+      const proc = (window as any).require('process');
+      const exe = nvidiaSmiPath(proc.platform, proc.env, (p) => fs.existsSync(p));
+      if (!exe) { this.gpuStatus = 'unavailable'; return; }
+      const smi = cp.spawn(exe, [
         '--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,name',
         '--format=csv,noheader,nounits',
         '-lms', '1000',

@@ -10,7 +10,7 @@ import { ChangeRecord, ChangeStore } from './changes';
 import { BrainSearch } from './brainsearch';
 import { HoverCard } from './hovercard';
 import { GrowthBar } from './growth';
-import { WelcomeModal, connectSection } from './onboarding';
+import { WelcomeModal, claudeCodeHooks, connectSection, copyButton, curlExample } from './onboarding';
 import { MANUAL_VIEW_TYPE, ManualView } from './manual';
 import { PhoneAlerts, PhoneFormat, randomTopic } from './phone';
 import { WebViewer } from './webviewer';
@@ -22,6 +22,9 @@ import { THEMES, chromeAccent, themeById } from './themes';
 import { addGroup, showMenu } from './menus';
 import { SHAPES, shapeById } from './shapes';
 import { AudioReactor, SYSTEM_AUDIO } from './audio';
+import { Credential, CredentialMeta, Scope, canAssertAgent, denyListFor, gate, hasScope, isDenied, newCredential, newKey } from './server/auth';
+import { sendError, sendJson, sendStatus } from './server/http';
+import { nodeDeps, removeSecretFile, vaultKeyDir, writeSecretFile } from './server/keyfile';
 
 
 export interface BridgeMessage {
@@ -134,6 +137,10 @@ interface PlexusSettings extends PlexusOptions {
   logSearches: boolean;
   agentAliases: string;
   listenerKey: string;
+  /** Accept the 1.1 shared listener key (bridge scope) until the user retires it. */
+  acceptLegacyKey: boolean;
+  /** Listener credentials (keys themselves live in SecretStorage). */
+  credentials: CredentialMeta[];
   /** Per-agent permissions, enforced by the bridge (written to policyFile). */
   policies: Record<string, AgentPolicy>;
   /** Master switch: off = the bridge applies no per-agent rules (protected paths still apply). */
@@ -251,6 +258,8 @@ const DEFAULT_SETTINGS: PlexusSettings = {
   logSearches: true,
   agentAliases: '',
   listenerKey: '',
+  acceptLegacyKey: true,
+  credentials: [],
   policies: {},
   enforcePermissions: true,
   defaultPcControl: 'ask',
@@ -285,6 +294,10 @@ export default class PlexusPlugin extends Plugin {
   private graph: BuiltGraph | null = null;
   private signature = '';
   private server: any = null;
+  /** Listener credentials with their keys (loaded from SecretStorage). */
+  credentials: Credential[] = [];
+  /** When each credential last made a request (this session). */
+  keyUsed = new Map<string, number>();
   // Grok also runs Claude's hooks, so one Grok tool call can arrive twice under two names.
   private recent = new Map<string, { agent: string; at: number }>();
   // Exposed on GET /health so agent wiring can be checked against what actually lit.
@@ -535,8 +548,9 @@ export default class PlexusPlugin extends Plugin {
 
   async contextPack(q: string, budget: number, agent: string): Promise<Pack> {
     const g = this.getGraph();
-    const deny = (this.settings.policies[agent]?.deny ?? '').split(',').map((d) => d.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase()).filter(Boolean);
-    const denied = (p: string) => { const l = p.toLowerCase(); return deny.some((d) => l === d || l.startsWith(d + '/')); };
+    // An agent without its own rule gets the most restrictive one, never none.
+    const deny = denyListFor(this.settings.policies, agent);
+    const denied = (p: string) => isDenied(p, deny);
     const pack = await buildPack(this.app, g.paths, g.links, await this.log.history(30), q, budget, denied);
     if (pack.notes.length) this.pulse({ agent, kind: 'read', texts: pack.notes.map((n) => n.path), purpose: q, source: 'context pack', tokens: Object.fromEntries(pack.notes.map((n) => [n.path, n.tokens])) });
     return pack;
@@ -1356,381 +1370,8 @@ export default class PlexusPlugin extends Plugin {
     const http = (window as any).require?.('http');
     if (!http) return;
     const server = http.createServer((req: any, res: any) => {
-      if (req.headers.origin) { res.writeHead(403); res.end(); return; }
-      // Every endpoint needs the shared key (header X-Hivemynd-Key, or ?key= for tools that
-      // can't set headers). Without it only a bare liveness answer is given.
-      const url = new URL(req.url ?? '/', 'http://local');
-      const authed = this.keyOk(String(req.headers['x-hivemynd-key'] ?? url.searchParams.get('key') ?? ''));
-      url.searchParams.delete('key');
-      req.url = url.pathname + url.search;
-      if (!authed) {
-        if (req.method === 'GET' && url.pathname === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}'); return; }
-        res.writeHead(401); res.end(); return;
-      }
-      // Tooling endpoints (view remote control, audio probes, reload) only answer in
-      // Developer mode. Agents need just pulses, hooks, prompts, approvals and packs.
-      if (!this.settings.developerMode && DEV_ROUTES.has(url.pathname)) { res.writeHead(404); res.end(); return; }
-      if (req.method === 'GET' && req.url === '/health' && !this.settings.developerMode) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, version: this.manifest.version }));
-        return;
-      }
-      if (req.method === 'GET' && req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        const sizes = this.views().map((v) => v.debugSizes());
-        const monitors = this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE).map((l) => ({
-          popout: l.view.containerEl.ownerDocument !== document,
-          attached: l.view.containerEl.isConnected,
-          w: l.view.containerEl.ownerDocument.defaultView?.innerWidth,
-          theme: (() => { const r = l.view.containerEl.querySelector('.plexus-log'); if (!r) return null; const cs = getComputedStyle(r); return { cls: r.className, bg: cs.backgroundColor, img: cs.backgroundImage.slice(0, 80), pl: cs.getPropertyValue('--pl-bg') }; })(),
-        }));
-        const render = this.views().map((v) => ({ stats: v.renderer?.stats() ?? null, audio: !!v.renderer?.audio, error: v.renderer?.lastError ?? null }));
-        res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, views: this.views().length, spanning: this.spanning, displays: this.displays().map((d) => `${d.name} ${d.w}x${d.h}@${d.x},${d.y}${d.primary ? ' main' : ''}`), monitors, sizes, render, audioFrames: this.audio.stats.frames, audioRunning: this.audio.running, ...this.stats }));
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/replay') {
-        // Toggle the replay scrubber in the brain view (view only).
-        res.writeHead(202); res.end();
-        for (const v of this.views()) void v.toggleReplay();
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/focus') {
-        // Light a set of notes in the brain: {notes: [paths], agent}; an empty body clears.
-        let body = '';
-        req.on('data', (c: string) => { body += c; });
-        req.on('end', () => {
-          try {
-            const d = body.trim() ? JSON.parse(body) : {};
-            this.focusTask(Array.isArray(d.notes) && d.notes.length ? d.notes : null, this.alias(String(d.agent ?? 'claude')));
-            res.writeHead(204);
-          } catch { res.writeHead(400); }
-          res.end();
-        });
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/music') {
-        // Toggle music reactivity (view only).
-        res.writeHead(202); res.end();
-        void this.toggleMusic();
-        return;
-      }
-      if (req.method === 'GET' && req.url === '/system-audio-probe') {
-        void (async () => {
-          let result: any;
-          try {
-            const stream = await AudioReactor.systemAudio();
-            const ctx = new AudioContext();
-            const an = ctx.createAnalyser();
-            ctx.createMediaStreamSource(stream).connect(an);
-            const buf = new Float32Array(an.fftSize);
-            let peak = 0;
-            const end = performance.now() + 800;
-            while (performance.now() < end) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => window.setTimeout(r, 30)); }
-            stream.getTracks().forEach((t) => t.stop());
-            void ctx.close();
-            result = { ok: true, peak: Math.round(peak * 1000) / 1000 };
-          } catch (err) {
-            result = { ok: false, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        })();
-        return;
-      }
-      if (req.method === 'GET' && req.url === '/audio-probe') {
-        void AudioReactor.inputs().then(async (list) => {
-          const ids = list.map((d) => d.deviceId).filter((id) => id !== 'default' && id !== 'communications');
-          const levels = await AudioReactor.probe(ids);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(list.filter((d) => ids.includes(d.deviceId)).map((d) => ({ label: d.label, peak: Math.round((levels[d.deviceId] ?? -1) * 1000) / 1000 })).sort((a, b) => b.peak - a.peak)));
-        });
-        return;
-      }
-      if (req.method === 'GET' && url.pathname === '/audio-levels') {
-        // Detector inputs over ?s= seconds of whatever is playing (tuning aid).
-        const secs = Math.min(30, Math.max(2, Number(url.searchParams.get('s')) || 8));
-        const st = this.audio.stats;
-        st.frames = 0; st.rms = []; st.share = []; st.full = [];
-        const o0 = this.audio.onsets;
-        const t0 = performance.now();
-        window.setTimeout(() => {
-          const q = (a: number[], p: number) => { const b = [...a].sort((x, y) => x - y); return b.length ? Math.round(b[Math.floor((b.length - 1) * p)] * 10000) / 10000 : null; };
-          const pct = (a: number[]) => ({ p10: q(a, 0.1), p50: q(a, 0.5), p90: q(a, 0.9), max: q(a, 1) });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          const times = this.audio.onsetTimes.filter((t) => t >= t0);
-          const gaps = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
-          const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
-          res.end(JSON.stringify({ seconds: secs, frames: st.frames, onsets: this.audio.onsets - o0, medianGapMs: Math.round(medGap), gaps: times.slice(1).map((t, i) => Math.round(t - times[i])), bpm: medGap ? Math.round(60000 / medGap) : null, device: this.audio.deviceLabel, rms: pct(st.rms), share: pct(st.share), full: pct(st.full) }));
-        }, secs * 1000);
-        return;
-      }
-      if (req.method === 'GET' && req.url === '/audio-devices') {
-        void AudioReactor.inputs().then((list) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ onsets: this.audio.onsets, selected: this.settings.audioDevice, running: this.audio.running, device: this.audio.deviceLabel, error: this.audio.error, inputs: list.map((d) => ({ id: d.deviceId, label: d.label })) }));
-        });
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/approve') {
-        // The bridge holds an agent's PC action until a person decides here.
-        let body = '';
-        req.on('data', (c: string) => { body += c; if (body.length > 20_000) req.destroy(); });
-        req.on('end', () => {
-          let d: { agent?: string; action?: string; detail?: string } = {};
-          try { d = JSON.parse(body); } catch { /* empty */ }
-          void this.toGlasses(`Approval needed: ${d.agent ?? 'an agent'} wants to ${d.action ?? 'act'}${d.detail ? ` (${String(d.detail).slice(0, 80)})` : ''}`);
-          void this.askApproval(d).then((approved) => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ approved }));
-          });
-        });
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/policy-block') {
-        // The bridge refused an agent something its permissions don't allow.
-        let body = '';
-        req.on('data', (c: string) => { body += c; });
-        req.on('end', () => {
-          try { this.policyBlocked(JSON.parse(body)); } catch { /* ignore */ }
-          res.writeHead(204); res.end();
-        });
-        return;
-      }
-      if (req.method === 'GET' && url.pathname === '/context-pack') {
-        // The notes most relevant to a task (?q=), cut to ?budget= tokens, as JSON. The
-        // agent's permissions apply, and the notes light up and log as reads by ?agent=.
-        const q = (url.searchParams.get('q') ?? '').slice(0, 300);
-        const agent = this.alias(url.searchParams.get('agent') || 'other');
-        const budget = Math.min(50_000, Math.max(500, Number(url.searchParams.get('budget')) || 6000));
-        void this.contextPack(q, budget, agent).then((pack) => {
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify(pack));
-        }).catch((err) => { res.writeHead(500); res.end(String(err)); });
-        return;
-      }
-      if (req.method === 'POST' && url.pathname === '/report') {
-        // Write the brain report for ?day=YYYY-MM-DD (default today) and return its path.
-        const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') ?? '') ? url.searchParams.get('day')! : dayKey(new Date());
-        void this.writeReport(day).then((path) => {
-          res.writeHead(path ? 200 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: !!path, path }));
-        });
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/meaning') {
-        // Toggle the meaning map (view only).
-        res.writeHead(202); res.end();
-        void this.toggleMeaning();
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/heat') {
-        // Toggle the heat & decay overlay (view only).
-        res.writeHead(202); res.end();
-        void this.toggleHeat();
-        return;
-      }
-      if (req.method === 'POST' && (req.url ?? '').startsWith('/open-monitor')) {
-        // Lets an agent pop the Brain Monitor window open (optionally on a tab); it can only open this one view.
-        res.writeHead(202); res.end();
-        const tab = /[?&]tab=([a-z]+)/.exec(req.url ?? '')?.[1];
-        void this.activateLog(true, tab);
-        return;
-      }
-      // ---- 1.1.0 extras: tasks (F5), authorship (F12), HUD (F13)
-      if (url.pathname === '/tasks' && req.method === 'GET') { json(res, this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000)); return; }
-      if (url.pathname === '/authorship' && req.method === 'GET') {
-        const path = url.searchParams.get('path') ?? '';
-        void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) }));
-        return;
-      }
-      if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines() }); return; }
-      if (req.method === 'POST' && (url.pathname === '/tasks' || url.pathname === '/tasks/claim' || url.pathname === '/tasks/done' || url.pathname === '/tasks/withdraw')) {
-        void readJson(req).then((body) => {
-          const agent = this.alias(String(body?.agent ?? ''));
-          if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
-          if (url.pathname === '/tasks') {
-            // An agent proposes a task; it waits for the user's approval in the Team tab.
-            const t = this.tasks.add({ title: String(body?.title ?? '').slice(0, 160) || 'Untitled task', detail: maskSecrets(String(body?.detail ?? '').slice(0, 2000)), path: body?.path ? normalizePath(String(body.path)) : undefined, by: agent, status: 'proposed' });
-            new Notice(`H!V3MYND: ${agent} proposed a task: “${t.title}”. Approve it in Brain Monitor → Team.`, 8000);
-            json(res, t);
-            return;
-          }
-          const t = this.tasks.get(String(body?.id ?? ''));
-          if (!t) { res.writeHead(404); res.end('no such task'); return; }
-          if (url.pathname === '/tasks/withdraw') {
-            // An agent takes back a task it proposed (only while it waits for approval).
-            if (t.by !== agent || t.status !== 'proposed') { json(res, { ok: false }); return; }
-            this.tasks.remove(t.id);
-            json(res, { ok: true });
-            return;
-          }
-          if (url.pathname === '/tasks/claim') {
-            if (t.status !== 'open') { json(res, { ok: false, status: t.status, agent: t.agent ?? null }); return; }
-            this.tasks.update(t.id, { status: 'claimed', agent, claimed: Date.now() });
-            if (t.path) this.claims.claim(agent, t.path, t.title, 60, true);
-            json(res, { ok: true, task: this.tasks.get(t.id) });
-            return;
-          }
-          if (t.agent && t.agent !== agent) { json(res, { ok: false, reason: `claimed by ${t.agent}` }); return; }
-          this.tasks.update(t.id, { status: 'done', done: Date.now(), agent, result: maskSecrets(String(body?.result ?? '').slice(0, 2000)) });
-          if (t.path) this.claims.release(agent, [t.path]);
-          new Notice(`H!V3MYND: ${agent} finished “${t.title}”.`, 6000);
-          json(res, { ok: true });
-        }).catch(() => { res.writeHead(400); res.end(); });
-        return;
-      }
-      // ---- teamwork: claims, handoffs, trust, gaps, daily brief
-      if (url.pathname === '/claims' && req.method === 'GET') { json(res, this.claims.list()); return; }
-      if (url.pathname === '/handoffs' && req.method === 'GET') { json(res, this.handoffs.slice(-50).reverse()); return; }
-      if (url.pathname === '/handoff' && req.method === 'GET') {
-        const from = this.alias(url.searchParams.get('from') ?? '');
-        if (!from) { res.writeHead(400); res.end('from= is required'); return; }
-        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
-        res.end(this.handoffPackFor(from, url.searchParams.get('to') ?? undefined, url.searchParams.get('task') ?? undefined));
-        return;
-      }
-      if ((url.pathname === '/check' || url.pathname === '/trust') && req.method === 'GET') {
-        const path = url.searchParams.get('path') ?? '';
-        const agent = this.alias(url.searchParams.get('agent') ?? '');
-        const claim = this.claims.holder(path);
-        json(res, { path, claim: claim && claim.agent !== agent ? claim : null, yours: claim?.agent === agent, trust: this.trustOf(path) });
-        return;
-      }
-      if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)); return; }
-      if (req.method === 'POST' && (url.pathname === '/claim' || url.pathname === '/release' || url.pathname === '/brief/now')) {
-        void readJson(req).then(async (body) => {
-          if (url.pathname === '/brief/now') {
-            // Optional "day": YYYY-MM-DD (default today, so far).
-            const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(body?.day ?? ''));
-            const day = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date();
-            json(res, { path: await this.writeBrief(day, body?.timelapse !== false) });
-            return;
-          }
-          const agent = this.alias(String(body?.agent ?? ''));
-          if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
-          const paths: string[] = Array.isArray(body?.paths) ? body.paths.map(String) : body?.path ? [String(body.path)] : [];
-          if (url.pathname === '/release') { json(res, { released: this.claims.release(agent, paths.length ? paths : undefined) }); return; }
-          const minutes = Math.max(1, Math.min(480, Number(body?.minutes) || this.settings.claimMinutes));
-          const claimed: Claim[] = [], conflicts: (Claim & { handoff: string })[] = [];
-          for (const p of paths) {
-            const r = this.claims.claim(agent, normalizePath(p), String(body?.purpose ?? '').slice(0, 200), minutes, true);
-            if ('claim' in r) claimed.push(r.claim);
-            else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
-          }
-          json(res, { ok: !conflicts.length, claimed, conflicts });
-        }).catch(() => { res.writeHead(400); res.end(); });
-        return;
-      }
-      if (req.method === 'GET' && url.pathname === '/snapshot') {
-        // Dev: one rendered frame of a brain view as PNG (view=, node=, dist=, light=0|1).
-        const v = this.views()[Number(url.searchParams.get('view') ?? 0)]?.renderer;
-        if (!v) { res.writeHead(404); res.end(); return; }
-        const num = (k: string) => (url.searchParams.has(k) ? Number(url.searchParams.get(k)) : undefined);
-        const light = url.searchParams.has('light') ? url.searchParams.get('light') === '1' : undefined;
-        const theme = url.searchParams.get('theme');
-        if (theme) v.setBrainTheme(themeById(theme));
-        const shape = url.searchParams.get('shape');
-        if (shape) v.setShape(shape, false);
-        const cl = url.searchParams.get('cluster');
-        if (cl !== null) v.setCluster(Number(cl));
-        const orb = url.searchParams.get('orbit');
-        if (orb) v.setOrbit(orb);
-        const oc = url.searchParams.get('orbitColor');
-        if (oc) v.setOrbitColor(oc);
-        void v.snapshot({ index: num('node'), dist: num('dist'), light, fit: url.searchParams.get('fit') === '1' }).then(async (b) => {
-          if (theme) v.setBrainTheme(themeById(this.settings.brainTheme));
-          if (shape) v.setShape(this.settings.brainShape, false);
-          if (cl !== null) v.setCluster(this.settings.brainCluster);
-          if (orb) v.setOrbit(this.settings.agentOrbit);
-          if (oc) v.setOrbitColor(this.settings.orbitColor);
-          if (!b) { res.writeHead(500); res.end(); return; }
-          res.writeHead(200, { 'Content-Type': 'image/png' });
-          res.end(new Uint8Array(await b.arrayBuffer()));
-        });
-        return;
-      }
-      if (req.method === 'POST' && (req.url === '/span/on' || req.url === '/span/off')) {
-        // Start or stop spanning the brain across the chosen monitors.
-        res.writeHead(202); res.end();
-        if (req.url === '/span/on') void this.startSpan(null); else this.endSpan();
-        return;
-      }
-      if (req.method === 'POST' && req.url === '/reload') {
-        // Dev convenience: pick up a fresh main.js build without restarting Obsidian.
-        res.writeHead(202); res.end();
-        const plugins = (this.app as any).plugins;
-        const id = this.manifest.id;
-        window.setTimeout(async () => { await plugins.disablePlugin(id); await plugins.loadManifests?.(); await plugins.enablePlugin(id); }, 50);
-        return;
-      }
-      // /pulse: pre-parsed events (Agent Bridge). /hook/<agent>: a raw PostToolUse payload
-      // piped straight from Claude Code or Grok Build by curl.
-      // /prompt/<agent>: a UserPromptSubmit payload, remembered as the purpose of that
-      // agent's next note accesses.
-      const hook = /^\/hook\/([a-z0-9_-]{1,40})$/i.exec(req.url ?? '');
-      const prompt = /^\/prompt\/([a-z0-9_-]{1,40})$/i.exec(req.url ?? '');
-      // /prewrite/<agent>: PreToolUse payload; snapshot the note before the agent writes.
-      // /bridge-message: a message (or array of them) relayed by the Agent Bridge.
-      const prewrite = /^\/prewrite\/([a-z0-9_-]{1,40})$/i.exec(req.url ?? '');
-      const bridgeMsg = req.url === '/bridge-message';
-      if (req.method !== 'POST' || (req.url !== '/pulse' && !hook && !prompt && !prewrite && !bridgeMsg)) { res.writeHead(404); res.end(); return; }
-      let body = '';
-      req.setEncoding('utf8');
-      req.on('data', (chunk: string) => {
-        body += chunk;
-        if (body.length > 1_000_000) { res.writeHead(413); res.end(); req.destroy(); }
-      });
-      req.on('end', () => {
-        let lit = 0;
-        try {
-          const data = JSON.parse(body);
-          if (prewrite) {
-            // Respond only after the snapshot is taken, so the write can't race it. If the
-            // note is claimed by another agent, or the agent is relying on a note with low
-            // trust, the reply tells it so (Claude Code's PreToolUse format: the reason is
-            // shown to the agent and the edit is held back).
-            const raw = prewrite[1].toLowerCase();
-            void this.snapshotBefore(data, raw)
-              .then((paths) => this.preWriteReply(this.alias(raw), paths, data))
-              .catch(() => null)
-              .then((reason) => {
-                if (reason && this.hookReplyAgents().has(raw)) {
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
-                } else { res.writeHead(204); res.end(); }
-              });
-            return;
-          }
-          if (bridgeMsg) {
-            for (const m of Array.isArray(data) ? data : [data]) this.addBridgeMessage(m);
-            res.writeHead(204); res.end(); return;
-          }
-          if (prompt) {
-            const p = promptFromHook(data);
-            const agent = prompt[1].toLowerCase();
-            if (p && this.settings.storePurposes) {
-              const entry = { text: maskSecrets(p.purpose), at: Date.now() };
-              this.purposes.set(`${agent}:${p.session}`, entry);
-              this.purposes.set(`${agent}:*`, entry);
-              this.savePurposes();
-            }
-            res.writeHead(204); res.end(); return;
-          }
-          const events: PulseEvent[] = hook ? hookToEvents(data, hook[1].toLowerCase()) : Array.isArray(data.events) ? data.events : [data];
-          if (hook) {
-            const adapter = this.app.vault.adapter;
-            const miss = searchMiss(data, adapter instanceof FileSystemAdapter ? adapter.getBasePath() : '');
-            if (miss) this.addMiss({ t: Date.now(), agent: this.alias(hook[1]), query: miss.query });
-          }
-          for (const ev of events) lit += this.pulse(ev);
-        } catch {
-          res.writeHead(400); res.end(); return;
-        }
-        // Hooks get an empty 204 so nothing lands in the agent's hook output.
-        if (hook) { res.writeHead(204); res.end(); return; }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, lit }));
-      });
+      // Nothing a request sends may take the listener down: anything thrown is a status.
+      try { this.handleRequest(req, res); } catch (err) { sendError(res, err); }
     });
     server.on('error', (err: any) => {
       new Notice(`H!V3MYND: agent listener couldn't start on port ${this.settings.port} (${err.code ?? err.message}).`);
@@ -1738,6 +1379,391 @@ export default class PlexusPlugin extends Plugin {
     });
     server.listen(this.settings.port, '127.0.0.1');
     this.server = server;
+  }
+
+  /** Every key the listener accepts: the user's credentials, plus the 1.1 shared key while it's still allowed. */
+  listenerCredentials(): Credential[] {
+    const out = this.credentials.filter((c) => c.key);
+    if (this.settings.acceptLegacyKey && this.settings.listenerKey) {
+      out.push({ id: 'legacy', label: 'Shared key (1.1)', agent: '', scope: 'bridge', key: this.settings.listenerKey, created: 0, legacy: true });
+    }
+    return out;
+  }
+
+  private handleRequest(req: any, res: any) {
+    // Origin, key, route, scope and agent identity are all checked in gate() (server/auth.ts).
+    const g = gate(req, { credentials: this.listenerCredentials(), developerMode: this.settings.developerMode, alias: (n) => this.alias(n) });
+    if (!g.ok) { if (g.body) sendJson(res, g.body, g.status); else sendStatus(res, g.status, g.text); return; }
+    const { url, cred } = g;
+    // The agent this request acts as: an agent key always acts as its own agent.
+    const who = g.who;
+    this.keyUsed.set(cred.id, Date.now());
+    if (req.method === 'GET' && url.pathname === '/health' && !(this.settings.developerMode && hasScope(cred, 'admin'))) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, version: this.manifest.version }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const sizes = this.views().map((v) => v.debugSizes());
+      const monitors = this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE).map((l) => ({
+        popout: l.view.containerEl.ownerDocument !== document,
+        attached: l.view.containerEl.isConnected,
+        w: l.view.containerEl.ownerDocument.defaultView?.innerWidth,
+        theme: (() => { const r = l.view.containerEl.querySelector('.plexus-log'); if (!r) return null; const cs = getComputedStyle(r); return { cls: r.className, bg: cs.backgroundColor, img: cs.backgroundImage.slice(0, 80), pl: cs.getPropertyValue('--pl-bg') }; })(),
+      }));
+      const render = this.views().map((v) => ({ stats: v.renderer?.stats() ?? null, audio: !!v.renderer?.audio, error: v.renderer?.lastError ?? null }));
+      res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, views: this.views().length, spanning: this.spanning, displays: this.displays().map((d) => `${d.name} ${d.w}x${d.h}@${d.x},${d.y}${d.primary ? ' main' : ''}`), monitors, sizes, render, audioFrames: this.audio.stats.frames, audioRunning: this.audio.running, ...this.stats }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/replay') {
+      // Toggle the replay scrubber in the brain view (view only).
+      res.writeHead(202); res.end();
+      for (const v of this.views()) void v.toggleReplay();
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/focus') {
+      // Light a set of notes in the brain: {notes: [paths], agent}; an empty body clears.
+      let body = '';
+      req.on('data', (c: string) => { body += c; });
+      req.on('end', () => {
+        try {
+          const d = body.trim() ? JSON.parse(body) : {};
+          this.focusTask(Array.isArray(d.notes) && d.notes.length ? d.notes : null, who(d.agent));
+          res.writeHead(204);
+        } catch { res.writeHead(400); }
+        res.end();
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/music') {
+      // Toggle music reactivity (view only).
+      res.writeHead(202); res.end();
+      void this.toggleMusic();
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/system-audio-probe') {
+      void (async () => {
+        let result: any;
+        try {
+          const stream = await AudioReactor.systemAudio();
+          const ctx = new AudioContext();
+          const an = ctx.createAnalyser();
+          ctx.createMediaStreamSource(stream).connect(an);
+          const buf = new Float32Array(an.fftSize);
+          let peak = 0;
+          const end = performance.now() + 800;
+          while (performance.now() < end) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => window.setTimeout(r, 30)); }
+          stream.getTracks().forEach((t) => t.stop());
+          void ctx.close();
+          result = { ok: true, peak: Math.round(peak * 1000) / 1000 };
+        } catch (err) {
+          result = { ok: false, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      })();
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/audio-probe') {
+      void AudioReactor.inputs().then(async (list) => {
+        const ids = list.map((d) => d.deviceId).filter((id) => id !== 'default' && id !== 'communications');
+        const levels = await AudioReactor.probe(ids);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(list.filter((d) => ids.includes(d.deviceId)).map((d) => ({ label: d.label, peak: Math.round((levels[d.deviceId] ?? -1) * 1000) / 1000 })).sort((a, b) => b.peak - a.peak)));
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/audio-levels') {
+      // Detector inputs over ?s= seconds of whatever is playing (tuning aid).
+      const secs = Math.min(30, Math.max(2, Number(url.searchParams.get('s')) || 8));
+      const st = this.audio.stats;
+      st.frames = 0; st.rms = []; st.share = []; st.full = [];
+      const o0 = this.audio.onsets;
+      const t0 = performance.now();
+      window.setTimeout(() => {
+        const q = (a: number[], p: number) => { const b = [...a].sort((x, y) => x - y); return b.length ? Math.round(b[Math.floor((b.length - 1) * p)] * 10000) / 10000 : null; };
+        const pct = (a: number[]) => ({ p10: q(a, 0.1), p50: q(a, 0.5), p90: q(a, 0.9), max: q(a, 1) });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const times = this.audio.onsetTimes.filter((t) => t >= t0);
+        const gaps = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+        const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+        res.end(JSON.stringify({ seconds: secs, frames: st.frames, onsets: this.audio.onsets - o0, medianGapMs: Math.round(medGap), gaps: times.slice(1).map((t, i) => Math.round(t - times[i])), bpm: medGap ? Math.round(60000 / medGap) : null, device: this.audio.deviceLabel, rms: pct(st.rms), share: pct(st.share), full: pct(st.full) }));
+      }, secs * 1000);
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/audio-devices') {
+      void AudioReactor.inputs().then((list) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ onsets: this.audio.onsets, selected: this.settings.audioDevice, running: this.audio.running, device: this.audio.deviceLabel, error: this.audio.error, inputs: list.map((d) => ({ id: d.deviceId, label: d.label })) }));
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/approve') {
+      // The bridge holds an agent's PC action until a person decides here.
+      let body = '';
+      req.on('data', (c: string) => { body += c; if (body.length > 20_000) req.destroy(); });
+      req.on('end', () => {
+        let d: { agent?: string; action?: string; detail?: string } = {};
+        try { d = JSON.parse(body); } catch { /* empty */ }
+        void this.toGlasses(`Approval needed: ${d.agent ?? 'an agent'} wants to ${d.action ?? 'act'}${d.detail ? ` (${String(d.detail).slice(0, 80)})` : ''}`);
+        void this.askApproval(d).then((approved) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ approved }));
+        });
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/policy-block') {
+      // The bridge refused an agent something its permissions don't allow.
+      let body = '';
+      req.on('data', (c: string) => { body += c; });
+      req.on('end', () => {
+        try { this.policyBlocked(JSON.parse(body)); } catch { /* ignore */ }
+        res.writeHead(204); res.end();
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/context-pack') {
+      // The notes most relevant to a task (?q=), cut to ?budget= tokens, as JSON. The
+      // agent's permissions apply, and the notes light up and log as reads by ?agent=.
+      const q = (url.searchParams.get('q') ?? '').slice(0, 300);
+      const agent = who(url.searchParams.get('agent'));
+      const budget = Math.min(50_000, Math.max(500, Number(url.searchParams.get('budget')) || 6000));
+      void this.contextPack(q, budget, agent).then((pack) => {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(pack));
+      }).catch((err) => { res.writeHead(500); res.end(String(err)); });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/report') {
+      // Write the brain report for ?day=YYYY-MM-DD (default today) and return its path.
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') ?? '') ? url.searchParams.get('day')! : dayKey(new Date());
+      void this.writeReport(day).then((path) => {
+        res.writeHead(path ? 200 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: !!path, path }));
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/meaning') {
+      // Toggle the meaning map (view only).
+      res.writeHead(202); res.end();
+      void this.toggleMeaning();
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/heat') {
+      // Toggle the heat & decay overlay (view only).
+      res.writeHead(202); res.end();
+      void this.toggleHeat();
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/open-monitor') {
+      // Lets an agent pop the Brain Monitor window open (optionally on a tab); it can only open this one view.
+      res.writeHead(202); res.end();
+      const tab = /^[a-z]+$/.exec(url.searchParams.get('tab') ?? '')?.[0];
+      void this.activateLog(true, tab);
+      return;
+    }
+    // ---- 1.1.0 extras: tasks (F5), authorship (F12), HUD (F13)
+    if (url.pathname === '/tasks' && req.method === 'GET') { json(res, this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000)); return; }
+    if (url.pathname === '/authorship' && req.method === 'GET') {
+      const path = url.searchParams.get('path') ?? '';
+      void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) }));
+      return;
+    }
+    if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines() }); return; }
+    if (req.method === 'POST' && (url.pathname === '/tasks' || url.pathname === '/tasks/claim' || url.pathname === '/tasks/done' || url.pathname === '/tasks/withdraw')) {
+      void readJson(req).then((body) => {
+        const agent = body?.agent || !canAssertAgent(cred) ? who(body?.agent) : '';
+        if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
+        if (url.pathname === '/tasks') {
+          // An agent proposes a task; it waits for the user's approval in the Team tab.
+          const t = this.tasks.add({ title: String(body?.title ?? '').slice(0, 160) || 'Untitled task', detail: maskSecrets(String(body?.detail ?? '').slice(0, 2000)), path: body?.path ? normalizePath(String(body.path)) : undefined, by: agent, status: 'proposed' });
+          new Notice(`H!V3MYND: ${agent} proposed a task: “${t.title}”. Approve it in Brain Monitor → Team.`, 8000);
+          json(res, t);
+          return;
+        }
+        const t = this.tasks.get(String(body?.id ?? ''));
+        if (!t) { res.writeHead(404); res.end('no such task'); return; }
+        if (url.pathname === '/tasks/withdraw') {
+          // An agent takes back a task it proposed (only while it waits for approval).
+          if (t.by !== agent || t.status !== 'proposed') { json(res, { ok: false }); return; }
+          this.tasks.remove(t.id);
+          json(res, { ok: true });
+          return;
+        }
+        if (url.pathname === '/tasks/claim') {
+          if (t.status !== 'open') { json(res, { ok: false, status: t.status, agent: t.agent ?? null }); return; }
+          this.tasks.update(t.id, { status: 'claimed', agent, claimed: Date.now() });
+          if (t.path) this.claims.claim(agent, t.path, t.title, 60, true);
+          json(res, { ok: true, task: this.tasks.get(t.id) });
+          return;
+        }
+        if (t.agent && t.agent !== agent) { json(res, { ok: false, reason: `claimed by ${t.agent}` }); return; }
+        this.tasks.update(t.id, { status: 'done', done: Date.now(), agent, result: maskSecrets(String(body?.result ?? '').slice(0, 2000)) });
+        if (t.path) this.claims.release(agent, [t.path]);
+        new Notice(`H!V3MYND: ${agent} finished “${t.title}”.`, 6000);
+        json(res, { ok: true });
+      }).catch(() => { res.writeHead(400); res.end(); });
+      return;
+    }
+    // ---- teamwork: claims, handoffs, trust, gaps, daily brief
+    if (url.pathname === '/claims' && req.method === 'GET') { json(res, this.claims.list()); return; }
+    if (url.pathname === '/handoffs' && req.method === 'GET') { json(res, this.handoffs.slice(-50).reverse()); return; }
+    if (url.pathname === '/handoff' && req.method === 'GET') {
+      const from = this.alias(url.searchParams.get('from') ?? '');
+      if (!from) { res.writeHead(400); res.end('from= is required'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+      res.end(this.handoffPackFor(from, url.searchParams.get('to') ?? undefined, url.searchParams.get('task') ?? undefined));
+      return;
+    }
+    if ((url.pathname === '/check' || url.pathname === '/trust') && req.method === 'GET') {
+      const path = url.searchParams.get('path') ?? '';
+      const agent = who(url.searchParams.get('agent'));
+      const claim = this.claims.holder(path);
+      json(res, { path, claim: claim && claim.agent !== agent ? claim : null, yours: claim?.agent === agent, trust: this.trustOf(path) });
+      return;
+    }
+    if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)); return; }
+    if (req.method === 'POST' && (url.pathname === '/claim' || url.pathname === '/release' || url.pathname === '/brief/now')) {
+      void readJson(req).then(async (body) => {
+        if (url.pathname === '/brief/now') {
+          // Optional "day": YYYY-MM-DD (default today, so far).
+          const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(body?.day ?? ''));
+          const day = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date();
+          json(res, { path: await this.writeBrief(day, body?.timelapse !== false) });
+          return;
+        }
+        const agent = body?.agent || !canAssertAgent(cred) ? who(body?.agent) : '';
+        if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
+        const paths: string[] = Array.isArray(body?.paths) ? body.paths.map(String) : body?.path ? [String(body.path)] : [];
+        if (url.pathname === '/release') { json(res, { released: this.claims.release(agent, paths.length ? paths : undefined) }); return; }
+        const minutes = Math.max(1, Math.min(480, Number(body?.minutes) || this.settings.claimMinutes));
+        const claimed: Claim[] = [], conflicts: (Claim & { handoff: string })[] = [];
+        for (const p of paths) {
+          const r = this.claims.claim(agent, normalizePath(p), String(body?.purpose ?? '').slice(0, 200), minutes, true);
+          if ('claim' in r) claimed.push(r.claim);
+          else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
+        }
+        json(res, { ok: !conflicts.length, claimed, conflicts });
+      }).catch(() => { res.writeHead(400); res.end(); });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/snapshot') {
+      // Dev: one rendered frame of a brain view as PNG (view=, node=, dist=, light=0|1).
+      const v = this.views()[Number(url.searchParams.get('view') ?? 0)]?.renderer;
+      if (!v) { res.writeHead(404); res.end(); return; }
+      const num = (k: string) => (url.searchParams.has(k) ? Number(url.searchParams.get(k)) : undefined);
+      const light = url.searchParams.has('light') ? url.searchParams.get('light') === '1' : undefined;
+      const theme = url.searchParams.get('theme');
+      if (theme) v.setBrainTheme(themeById(theme));
+      const shape = url.searchParams.get('shape');
+      if (shape) v.setShape(shape, false);
+      const cl = url.searchParams.get('cluster');
+      if (cl !== null) v.setCluster(Number(cl));
+      const orb = url.searchParams.get('orbit');
+      if (orb) v.setOrbit(orb);
+      const oc = url.searchParams.get('orbitColor');
+      if (oc) v.setOrbitColor(oc);
+      void v.snapshot({ index: num('node'), dist: num('dist'), light, fit: url.searchParams.get('fit') === '1' }).then(async (b) => {
+        if (theme) v.setBrainTheme(themeById(this.settings.brainTheme));
+        if (shape) v.setShape(this.settings.brainShape, false);
+        if (cl !== null) v.setCluster(this.settings.brainCluster);
+        if (orb) v.setOrbit(this.settings.agentOrbit);
+        if (oc) v.setOrbitColor(this.settings.orbitColor);
+        if (!b) { res.writeHead(500); res.end(); return; }
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        res.end(new Uint8Array(await b.arrayBuffer()));
+      });
+      return;
+    }
+    if (req.method === 'POST' && (url.pathname === '/span/on' || url.pathname === '/span/off')) {
+      // Start or stop spanning the brain across the chosen monitors.
+      res.writeHead(202); res.end();
+      if (url.pathname === '/span/on') void this.startSpan(null); else this.endSpan();
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/reload') {
+      // Dev convenience: pick up a fresh main.js build without restarting Obsidian.
+      res.writeHead(202); res.end();
+      const plugins = (this.app as any).plugins;
+      const id = this.manifest.id;
+      window.setTimeout(async () => { await plugins.disablePlugin(id); await plugins.loadManifests?.(); await plugins.enablePlugin(id); }, 50);
+      return;
+    }
+    // /pulse: pre-parsed events (Agent Bridge). /hook/<agent>: a raw PostToolUse payload
+    // piped straight from Claude Code or Grok Build by curl.
+    // /prompt/<agent>: a UserPromptSubmit payload, remembered as the purpose of that
+    // agent's next note accesses.
+    const hook = /^\/hook\/([a-z0-9_-]{1,40})$/i.exec(url.pathname);
+    const prompt = /^\/prompt\/([a-z0-9_-]{1,40})$/i.exec(url.pathname);
+    // /prewrite/<agent>: PreToolUse payload; snapshot the note before the agent writes.
+    // /bridge-message: a message (or array of them) relayed by the Agent Bridge.
+    const prewrite = /^\/prewrite\/([a-z0-9_-]{1,40})$/i.exec(url.pathname);
+    const bridgeMsg = url.pathname === '/bridge-message';
+    if (req.method !== 'POST' || (url.pathname !== '/pulse' && !hook && !prompt && !prewrite && !bridgeMsg)) { res.writeHead(404); res.end(); return; }
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => {
+      body += chunk;
+      if (body.length > 1_000_000) { res.writeHead(413); res.end(); req.destroy(); }
+    });
+    req.on('end', () => {
+      let lit = 0;
+      try {
+        const data = JSON.parse(body);
+        if (prewrite) {
+          // Respond only after the snapshot is taken, so the write can't race it. If the
+          // note is claimed by another agent, or the agent is relying on a note with low
+          // trust, the reply tells it so (Claude Code's PreToolUse format: the reason is
+          // shown to the agent and the edit is held back).
+          const raw = prewrite[1].toLowerCase();
+          void this.snapshotBefore(data, raw)
+            .then((paths) => this.preWriteReply(this.alias(raw), paths, data))
+            .catch(() => null)
+            .then((reason) => {
+              if (reason && this.hookReplyAgents().has(raw)) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
+              } else { res.writeHead(204); res.end(); }
+            });
+          return;
+        }
+        if (bridgeMsg) {
+          for (const m of Array.isArray(data) ? data : [data]) this.addBridgeMessage(m);
+          res.writeHead(204); res.end(); return;
+        }
+        if (prompt) {
+          const p = promptFromHook(data);
+          const agent = prompt[1].toLowerCase();
+          if (p && this.settings.storePurposes) {
+            const entry = { text: maskSecrets(p.purpose), at: Date.now() };
+            this.purposes.set(`${agent}:${p.session}`, entry);
+            this.purposes.set(`${agent}:*`, entry);
+            this.savePurposes();
+          }
+          res.writeHead(204); res.end(); return;
+        }
+        const events: PulseEvent[] = hook ? hookToEvents(data, hook[1].toLowerCase()) : Array.isArray(data.events) ? data.events : [data];
+        if (hook) {
+          const adapter = this.app.vault.adapter;
+          const miss = searchMiss(data, adapter instanceof FileSystemAdapter ? adapter.getBasePath() : '');
+          if (miss) this.addMiss({ t: Date.now(), agent: this.alias(hook[1]), query: miss.query });
+        }
+        for (const ev of events) {
+          if (!ev || typeof ev !== 'object') continue;
+          // Events are reports from the key holder: an agent key's events are always its own.
+          if (!canAssertAgent(cred)) ev.agent = cred.agent;
+          lit += this.pulse(ev);
+        }
+      } catch {
+        res.writeHead(400); res.end(); return;
+      }
+      // Hooks get an empty 204 so nothing lands in the agent's hook output.
+      if (hook) { res.writeHead(204); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, lit }));
+    });
   }
 
   stopServer() {
@@ -2342,9 +2368,6 @@ export default class PlexusPlugin extends Plugin {
 
   // ------------------------------------------------------------ settings
 
-  /** Constant-time comparison against the listener key. */
-  private keyOk(given: string) { return safeEqual(this.settings.listenerKey, given); }
-
   /** Path other local tools (bridge, hooks) read the key from. */
   keyFilePath() {
     const os = (window as any).require('os');
@@ -2352,16 +2375,101 @@ export default class PlexusPlugin extends Plugin {
     return path.join(os.homedir(), '.hivemynd', 'listener.key');
   }
 
-  private writeKeyFile() {
-    try {
-      const fs = (window as any).require('fs');
-      const path = (window as any).require('path');
-      const file = this.keyFilePath();
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, this.settings.listenerKey, { encoding: 'utf8', mode: 0o600 });
-    } catch (err) {
-      console.warn('H!V3MYND: could not write listener key file', err);
+  /** This vault's own key folder, where bridge keys are saved. */
+  vaultKeyDir(): string | null {
+    const d = nodeDeps();
+    const adapter = this.app.vault.adapter;
+    if (!d || !(adapter instanceof FileSystemAdapter)) return null;
+    return vaultKeyDir(d, this.app.vault.getName(), adapter.getBasePath());
+  }
+
+  /** Key file for a bridge credential; agent and admin keys go into hook configs instead. */
+  credentialFile(c: CredentialMeta): string | null {
+    const dir = this.vaultKeyDir();
+    const d = nodeDeps();
+    return dir && d && c.scope === 'bridge' ? d.path.join(dir, `${c.agent || 'bridge'}-${c.id}.key`) : null;
+  }
+
+  /**
+   * Writes the key files local tools read: one per bridge credential in this vault's
+   * folder, and the 1.1 shared file while the shared key is still accepted (removed
+   * once it's retired, if it still holds this vault's key).
+   */
+  private async writeKeyFiles() {
+    const d = nodeDeps();
+    if (!d) return;
+    const fail = (err: unknown) => console.warn('H!V3MYND: could not write a listener key file', err);
+    const legacy = this.keyFilePath();
+    if (this.settings.acceptLegacyKey && this.settings.listenerKey) await writeSecretFile(d, legacy, this.settings.listenerKey).catch(fail);
+    else {
+      try { if (d.fs.readFileSync(legacy, 'utf8').trim() === this.settings.listenerKey) removeSecretFile(d, legacy); } catch { /* not there */ }
     }
+    for (const c of this.credentials) {
+      const file = this.credentialFile(c);
+      if (file) await writeSecretFile(d, file, c.key).catch(fail);
+    }
+  }
+
+  private credentialSecretId(id: string) { return `hivemynd-cred-${id}`; }
+
+  /** Loads credential keys from SecretStorage; a credential whose key is missing is dropped. */
+  private loadCredentials() {
+    const ss = this.app.secretStorage;
+    this.credentials = (this.settings.credentials ?? []).map((m) => ({ ...m, key: ss.getSecret(this.credentialSecretId(m.id)) ?? '' })).filter((c) => c.key);
+  }
+
+  private async saveCredentials() {
+    this.settings.credentials = this.credentials.map(({ key: _key, ...meta }) => meta);
+    await this.saveData(this.settings);
+    await this.writeKeyFiles();
+  }
+
+  async addCredential(label: string, agent: string, scope: Scope): Promise<Credential> {
+    const c = newCredential(label, agent, scope);
+    this.app.secretStorage.setSecret(this.credentialSecretId(c.id), c.key);
+    this.credentials.push(c);
+    await this.saveCredentials();
+    return c;
+  }
+
+  async revokeCredential(id: string) {
+    const c = this.credentials.find((x) => x.id === id);
+    if (!c) return;
+    this.app.secretStorage.setSecret(this.credentialSecretId(id), '');
+    const d = nodeDeps();
+    const file = this.credentialFile(c);
+    if (d && file) removeSecretFile(d, file);
+    this.credentials = this.credentials.filter((x) => x.id !== id);
+    await this.saveCredentials();
+  }
+
+  async regenerateCredential(id: string) {
+    const c = this.credentials.find((x) => x.id === id);
+    if (!c) return;
+    c.key = newKey();
+    this.app.secretStorage.setSecret(this.credentialSecretId(id), c.key);
+    await this.saveCredentials();
+  }
+
+  /**
+   * Soft migration from the 1.1 shared key: one agent key per configured agent and
+   * one bridge key, skipping any that already exist. The shared key keeps working
+   * until the user retires it.
+   */
+  async migrateCredentials(): Promise<Credential[]> {
+    const made: Credential[] = [];
+    const have = (agent: string, scope: Scope) => this.credentials.some((c) => c.agent === agent && c.scope === scope);
+    for (const a of this.settings.agents.filter((x) => x.name !== 'other')) {
+      if (!have(a.name, 'agent')) made.push(await this.addCredential(`${a.name} hooks`, a.name, 'agent'));
+    }
+    if (!this.credentials.some((c) => c.scope === 'bridge')) made.push(await this.addCredential('Agent Bridge', 'bridge', 'bridge'));
+    return made;
+  }
+
+  async setAcceptLegacyKey(on: boolean) {
+    this.settings.acceptLegacyKey = on;
+    await this.saveData(this.settings);
+    await this.writeKeyFiles();
   }
 
   async regenerateViewerKey() {
@@ -2371,11 +2479,9 @@ export default class PlexusPlugin extends Plugin {
   }
 
   async regenerateKey() {
-    const bytes = new Uint8Array(24);
-    crypto.getRandomValues(bytes);
-    this.settings.listenerKey = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    this.settings.listenerKey = newKey();
     await this.saveData(this.settings);
-    this.writeKeyFile();
+    await this.writeKeyFiles();
   }
 
   /**
@@ -2407,12 +2513,19 @@ export default class PlexusPlugin extends Plugin {
     // Themes replaced the light/dark switches: light = Inkblot, dark = Multiverse.
     if (!this.settings.brainTheme) this.settings.brainTheme = this.settings.brainLight ? 'inkblot' : 'multiverse';
     if (!this.settings.monitorTheme) this.settings.monitorTheme = this.settings.monitorLight ? 'inkblot' : 'multiverse';
-    if (!this.settings.listenerKey) await this.regenerateKey();
-    else this.writeKeyFile();
     if (!this.settings.viewerKey) { this.settings.viewerKey = randomHex(24); await this.saveData(this.settings); }
     // Keep agents added in later versions even if the saved list predates them.
     const names = new Set(this.settings.agents.map((a) => a.name));
     this.settings.agents = [...this.settings.agents, ...DEFAULT_OPTIONS.agents.filter((a) => !names.has(a.name))];
+    this.loadCredentials();
+    // A fresh install starts with the shared key retired and one key per agent; an
+    // upgrade keeps the 1.1 shared key working until the user migrates.
+    if (!this.settings.listenerKey && !saved.credentials) {
+      this.settings.acceptLegacyKey = false;
+      this.settings.listenerKey = newKey();
+      await this.migrateCredentials();
+    } else if (!this.settings.listenerKey) await this.regenerateKey();
+    else await this.writeKeyFiles();
   }
 
   async saveSettings() {
@@ -3150,6 +3263,56 @@ class PlexusSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  /** Listener keys: one per agent, each limited to what that kind of client needs. */
+  private keysSection(containerEl: HTMLElement) {
+    const p = this.plugin;
+    const s = p.settings;
+    const ago = (id: string) => { const t = p.keyUsed.get(id); return t ? `last used ${new Date(t).toLocaleTimeString([], { hour12: false })}` : 'not used since Obsidian started'; };
+    const scopeText: Record<Scope, string> = {
+      observer: 'Observer: reports activity only',
+      agent: 'Agent: activity, pre-write checks, context packs, tasks and claims',
+      bridge: 'Bridge: may act for any agent (the bridge checks its own agents)',
+      admin: 'Admin: everything, including Developer mode tools',
+    };
+    new Setting(containerEl).setName('Agent keys').setHeading();
+    if (s.acceptLegacyKey) {
+      new Setting(containerEl).setName('Shared key from version 1.1 still accepted')
+        .setDesc(`Anyone with this one key can act as any agent. Create per-agent keys, paste each agent's new snippet, then retire the shared key. It's saved to ${p.keyFilePath()} for older bridges (${ago('legacy')}).`)
+        .addButton((b) => b.setButtonText('Create agent keys').setCta().onClick(async () => {
+          const made = await p.migrateCredentials();
+          new Notice(made.length ? `H!V3MYND: created ${made.length} key${made.length === 1 ? '' : 's'}. Copy each agent's snippet below.` : 'H!V3MYND: every agent already has a key.');
+          this.display();
+        }))
+        .addButton((b) => b.setButtonText('Copy shared key').onClick(() => { void navigator.clipboard.writeText(s.listenerKey); new Notice('H!V3MYND: copied'); }))
+        .addButton((b) => b.setButtonText('Retire shared key').setWarning().onClick(async () => {
+          await p.setAcceptLegacyKey(false);
+          new Notice('H!V3MYND: the shared key no longer works.');
+          this.display();
+        }));
+    }
+    for (const c of p.credentials) {
+      const file = p.credentialFile(c);
+      const row = new Setting(containerEl).setName(c.label)
+        .setDesc(`${scopeText[c.scope]}${c.agent && c.scope !== 'bridge' && c.scope !== 'admin' ? ` · acts as ${c.agent}` : ''}${file ? ` · saved to ${file}` : ''} · ${ago(c.id)}`);
+      if (c.scope === 'observer' || c.scope === 'agent') {
+        row.addButton(copyButton('Claude Code hooks', () => claudeCodeHooks(s.port, c.key, c.agent)));
+        row.addButton(copyButton('curl example', () => curlExample(s.port, c.key, c.agent)));
+      }
+      row.addButton(copyButton('Copy key', () => c.key));
+      row.addExtraButton((b) => b.setIcon('refresh-cw').setTooltip('Regenerate (the old key stops working)').onClick(async () => { await p.regenerateCredential(c.id); this.display(); }));
+      row.addExtraButton((b) => b.setIcon('trash').setTooltip('Revoke').onClick(async () => { await p.revokeCredential(c.id); this.display(); }));
+    }
+    let agent = '', scope: Scope = 'agent';
+    new Setting(containerEl).setName('Add a key').setDesc('Agent name as it appears in the brain (e.g. claude), and what the key may do.')
+      .addText((t) => t.setPlaceholder('agent name').onChange((v) => { agent = v; }))
+      .addDropdown((d) => d.addOptions({ observer: 'Observer', agent: 'Agent', bridge: 'Bridge', admin: 'Admin' }).setValue(scope).onChange((v) => { scope = v as Scope; }))
+      .addButton((b) => b.setButtonText('Add').onClick(async () => {
+        if (!agent.trim() && (scope === 'observer' || scope === 'agent')) { new Notice('H!V3MYND: name the agent this key is for.'); return; }
+        await p.addCredential(`${agent.trim() || scope} ${scope === 'agent' ? 'hooks' : scope}`, agent, scope);
+        this.display();
+      }));
+  }
+
   display() {
     let { containerEl } = this;
     const s = this.plugin.settings;
@@ -3335,10 +3498,8 @@ class PlexusSettingTab extends PluginSettingTab {
         save();
         this.plugin.restartServer();
       }, 800, true)));
-    new Setting(containerEl).setName('Listener key').setDesc(`Every request to the local listener must carry this key (header X-Hivemynd-Key). It's also saved to ${this.plugin.keyFilePath()} so local tools can read it. If you regenerate it, update your hook configs.`)
-      .addButton((b) => b.setButtonText('Copy key').onClick(() => { void navigator.clipboard.writeText(s.listenerKey); new Notice('H!V3MYND key copied'); }))
-      .addButton((b) => b.setButtonText('Regenerate').setWarning().onClick(async () => { await this.plugin.regenerateKey(); new Notice('H!V3MYND: new key saved. Update hook configs that send the old one.'); }));
-    connectSection(containerEl, s.port, s.listenerKey);
+    connectSection(containerEl);
+    this.keysSection(containerEl);
     new Setting(containerEl).setName('Agent aliases').setDesc('Show one token name as another, e.g. "bot2=claude" when an agent reports under a different name. Comma-separated.').addText((t) =>
       t.setValue(s.agentAliases).onChange(debounce((v: string) => { s.agentAliases = v; save(); }, 600, true)));
     s.agents.forEach((agent) => {
@@ -3415,8 +3576,6 @@ const SECRET_FIELDS: [string, string][] = [
   ['phoneUrl', 'hivemynd-alert-url'],
 ];
 
-/** Listener routes that only answer in Developer mode. */
-const DEV_ROUTES = new Set(['/replay', '/focus', '/music', '/system-audio-probe', '/audio-probe', '/audio-levels', '/audio-devices', '/report', '/meaning', '/heat', '/open-monitor', '/reload', '/snapshot']);
 
 // ------------------------------------------------------------------ span helpers
 
