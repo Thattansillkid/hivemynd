@@ -22,6 +22,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=moderate
+      - run: npm test
       - run: npm run build
       - name: Tag must match manifest version
         run: test "$(node -p "require('./manifest.json').version")" = "${GITHUB_REF_NAME}"
