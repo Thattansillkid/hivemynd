@@ -1,7 +1,7 @@
 {
   "id": "hivemynd",
   "name": "Hivemynd",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "minAppVersion": "1.11.4",
   "description": "See your vault as a living 3D brain and watch AI agents read and write your notes, with replay, permissions and audit.",
   "author": "J Tansill",
