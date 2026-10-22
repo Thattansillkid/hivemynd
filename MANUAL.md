@@ -455,7 +455,7 @@ Placeholders such as `your-api-key` or `sk-xxxx` are left alone.
 
 ### Daily brief
 
-Each morning (06:00 by default), Hivemynd writes a note about the previous day of agent work into `H!V3MYND/Briefs`:
+The daily brief is off until you turn it on in Settings → **Daily brief**. Then each morning (06:00 by default), Hivemynd writes a note about the previous day of agent work into `H!V3MYND/Briefs`:
 
 - **In short:** which agents worked, how much, the busiest area, and how many notes changed.
 - **A 30-second time-lapse** of the day's activity in the brain, recorded with the cinematic camera running. The brain view must be open for this; otherwise the brief says it was skipped.

@@ -1,4 +1,6 @@
-import { ItemView, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, Menu, WorkspaceLeaf, setIcon } from 'obsidian';
+import { THEMES, monitorVars, themeById } from './themes';
+import { showMenu } from './menus';
 import { AccessEntry, AccessLog, clock, dayKey, noteTitle } from './accesslog';
 import type { AgentStyle } from './renderer';
 import type { Monitor, Sample } from './monitor';
@@ -10,6 +12,8 @@ const RANGE_LABEL: Record<BudgetRange, string> = { day: 'today', week: 'last 7 d
 import { ChangeRecord, ChangeStore, diffLines, diffStats } from './changes';
 import type { BridgeMessage } from './main';
 import { Dashboard, PanelPos } from './dashboard';
+import type { Claim, Gap, Handoff, Trust } from './team';
+import type { AgentTask } from './extras';
 
 export const LOG_VIEW_TYPE = 'plexus-access-log';
 
@@ -39,8 +43,8 @@ export interface LogHost {
   focusTask(notes: string[] | null, agent: string): void;
   exportTask(t: TaskGroup): void;
   /** Saved Brain Monitor panel layout and budget range (plugin settings). */
-  monitorUi(): { layout: PanelPos[] | null; budgetRange: BudgetRange; light: boolean };
-  saveMonitorUi(patch: Partial<{ layout: PanelPos[]; budgetRange: BudgetRange; light: boolean }>): void;
+  monitorUi(): { layout: PanelPos[] | null; budgetRange: BudgetRange; light: boolean; theme?: string };
+  saveMonitorUi(patch: Partial<{ layout: PanelPos[]; budgetRange: BudgetRange; light: boolean; theme: string }>): void;
   gaps(): {
     misses: { query: string; n: number; agents: Set<string>; last: number }[];
     rereads: Reread[];
@@ -49,6 +53,20 @@ export interface LogHost {
     broken: { source: string; targets: string[] }[];
     brokenTotal: number;
   };
+  /** Teamwork: claims, handoffs, the daily brief. */
+  team(): { claims: Claim[]; handoffs: Handoff[]; lastBrief: string; briefFolder: string; briefHour: number; claimMode: string };
+  onTeam(fn: () => void): () => void;
+  releaseClaim(path: string): void;
+  handoffPack(h: Handoff): string;
+  showTrail(h: Handoff): void;
+  writeBriefNow(): Promise<string | null>;
+  radar(): Promise<{ gaps: Gap[]; trust: { path: string; trust: Trust }[] }>;
+  draftStub(g: Gap): Promise<void>;
+  /** F5: tasks agents can claim (from the gap radar, or proposed by agents). */
+  agentTasks(): AgentTask[];
+  makeTask(g: Gap): void;
+  approveTask(id: string): void;
+  removeTask(id: string): void;
 }
 
 const STATE_LABEL: Record<AgentState, string> = { active: 'Active', idle: 'Idle', quiet: 'Quiet', unseen: 'Not seen' };
@@ -106,8 +124,7 @@ export class AccessLogView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass('plexus-log');
-    root.toggleClass('is-light', !!this.host.monitorUi().light);
-    this.lightChrome(!!this.host.monitorUi().light);
+    this.applyMonitorTheme(this.host.monitorUi().theme ?? (this.host.monitorUi().light ? 'inkblot' : 'multiverse'));
     root.tabIndex = 0;
 
     // ---- header
@@ -118,7 +135,7 @@ export class AccessLogView extends ItemView {
     live.createSpan({ cls: 'plexus-log-live-dot' });
     live.createSpan({ text: 'Live' });
     const tabs = head.createDiv({ cls: 'pm-tabs' });
-    for (const [key, label, icon] of [['overview', 'Overview', 'layout-dashboard'], ['bridge', 'Bridge traffic', 'messages-square'], ['changes', 'Changes', 'git-compare'], ['tasks', 'Tasks', 'route'], ['gaps', 'Gaps', 'puzzle']]) {
+    for (const [key, label, icon] of [['overview', 'Overview', 'layout-dashboard'], ['bridge', 'Bridge traffic', 'messages-square'], ['changes', 'Changes', 'git-compare'], ['tasks', 'Tasks', 'route'], ['team', 'Team', 'users'], ['gaps', 'Gaps', 'puzzle']]) {
       const b = tabs.createEl('button', { cls: 'pm-tab' });
       setIcon(b.createSpan({ cls: 'pm-tab-icon' }), icon);
       b.createSpan({ text: label });
@@ -128,13 +145,19 @@ export class AccessLogView extends ItemView {
     this.clockEl = head.createDiv({ cls: 'pm-clock' });
     const actions = head.createDiv({ cls: 'pm-actions' });
     const inMainWindow = this.containerEl.ownerDocument === document;
-    const themeBtn = this.headButton(actions, root.hasClass('is-light') ? 'moon' : 'sun', 'Light / dark theme', () => {
-      const light = !root.hasClass('is-light');
-      root.toggleClass('is-light', light);
-      this.lightChrome(light);
-      setIcon(themeBtn, light ? 'moon' : 'sun');
-      this.host.saveMonitorUi({ light });
-      this.onSample(); // redraw charts in the new colours
+    // Theme drop-down (the same themes as the brain; chosen separately).
+    const themeBtn = this.headButton(actions, 'palette', 'Theme', () => {
+      const menu = new Menu();
+      const cur = root.dataset.theme;
+      for (const t of THEMES) {
+        menu.addItem((item) => item.setTitle(t.name).setChecked(t.id === cur).onClick(() => {
+          this.applyMonitorTheme(t.id);
+          this.host.saveMonitorUi({ theme: t.id, light: t.light });
+          this.onSample(); // redraw charts in the new colours
+        }));
+      }
+      const r = themeBtn.getBoundingClientRect();
+      showMenu(menu, { x: r.left, y: r.bottom + 4 }, root.ownerDocument);
     });
     this.headButton(actions, 'layout-grid', 'Panels: show, hide, lock or reset the layout', (e) => this.dash?.menu(e));
     if (inMainWindow) this.headButton(actions, 'external-link', 'Open in its own window', () => this.host.popOut());
@@ -151,6 +174,7 @@ export class AccessLogView extends ItemView {
     this.buildBridgePage(root);
     this.buildChangesPage(root);
     this.buildTasksPage(root);
+    this.buildTeamPage(root);
     this.buildGapsPage(root);
     this.showPage('overview');
 
@@ -253,6 +277,18 @@ export class AccessLogView extends ItemView {
   }
 
   /** In its own window the monitor owns the frame too (tab bar, title bar): match it. */
+  /** Inkblot = the light style, Multiverse = the dark style, others recolour the dark style. */
+  private applyMonitorTheme(id: string) {
+    const root = this.contentEl;
+    const t = themeById(id);
+    root.dataset.theme = t.id;
+    root.toggleClass('is-light', t.light);
+    this.lightChrome(t.light);
+    const vars = monitorVars(t);
+    for (const k of ['--pl-bg', '--pl-panel', '--pl-line', '--pl-cyan', '--pl-text', '--pl-dim', '--pl-faint']) root.style.removeProperty(k);
+    if (vars) for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+  }
+
   private lightChrome(light: boolean) {
     const doc = this.contentEl.ownerDocument;
     if (doc !== document) doc.body.toggleClass('plexus-light-window', light);
@@ -328,6 +364,105 @@ export class AccessLogView extends ItemView {
     if (key === 'changes') this.renderChanges();
     if (key === 'tasks') this.renderTasks();
     if (key === 'gaps') this.renderGaps();
+    if (key === 'team') this.renderTeam();
+  }
+
+  // ------------------------------------------------------------ teamwork
+
+  private teamEl: HTMLElement | null = null;
+  private openPack: string | null = null;
+
+  private buildTeamPage(root: HTMLElement) {
+    const page = root.createDiv({ cls: 'pm-page pm-gaps pm-team' });
+    this.pages.set('team', page);
+    this.teamEl = page;
+    const off = this.host.onTeam(() => this.renderTeam());
+    this.register(off);
+    // Claims expire on their own; keep the countdowns honest.
+    this.registerInterval(window.setInterval(() => this.renderTeam(), 30_000));
+  }
+
+  private renderTeam() {
+    if (!this.teamEl || this.pages.get('team')!.style.display === 'none') return;
+    const t = this.host.team();
+    const el = this.teamEl;
+    el.empty();
+    const link = (parent: HTMLElement, path: string) => {
+      const a = parent.createEl('a', { cls: 'plexus-log-note-title', text: noteTitle(path), attr: { title: path } });
+      a.addEventListener('click', (ev) => { ev.preventDefault(); this.host.openNote(path, 'other'); });
+      return a;
+    };
+    const until = (ms: number) => { const m = Math.max(0, Math.round(ms / 60_000)); return m < 60 ? `${m} min left` : `${Math.round(m / 60)} h left`; };
+
+    const claims = this.card(el, 'pm-gap', `Claims · ${t.claims.length} active`, 'lock');
+    claims.createDiv({ cls: 'pm-gap-why', text: t.claimMode === 'off'
+      ? 'Claims are off (Settings → Agent teamwork).'
+      : `An agent that edits a note holds it for a while. Another agent trying to edit it is ${t.claimMode === 'block' ? 'held back' : 'warned once'} and pointed at the handoff. Agents can also claim notes on purpose (POST /claim).` });
+    if (!t.claims.length) claims.createDiv({ cls: 'pm-empty', text: 'No note is claimed right now.' });
+    for (const c of t.claims) {
+      const row = claims.createDiv({ cls: 'pm-gap-row pm-team-row' });
+      row.style.setProperty('--agent', colorOf(this.host.agents(), c.agent));
+      const main = row.createDiv({ cls: 'pm-team-main' });
+      link(main, c.path);
+      main.createDiv({ cls: 'pm-gap-meta', text: `${c.agent}${c.purpose ? ` · ${c.purpose}` : ''} · ${c.explicit ? 'claimed' : 'editing'} · ${until(c.until - Date.now())}` });
+      const rel = row.createEl('button', { cls: 'plexus-log-more', text: 'Release' });
+      rel.addEventListener('click', () => this.host.releaseClaim(c.path));
+    }
+
+    const hand = this.card(el, 'pm-gap', 'Handoffs', 'git-pull-request-arrow');
+    hand.createDiv({ cls: 'pm-gap-why', text: 'One agent picked up notes another agent edited and then stepped away from. The pack says what the first one did, so the next one doesn\u2019t start cold.' });
+    if (!t.handoffs.length) hand.createDiv({ cls: 'pm-empty', text: 'No handoffs yet. They appear when a second agent continues another agent\u2019s work.' });
+    for (const h of t.handoffs.slice(0, 20)) {
+      const row = hand.createDiv({ cls: 'pm-gap-row pm-team-row' });
+      row.style.setProperty('--agent', colorOf(this.host.agents(), h.to));
+      const main = row.createDiv({ cls: 'pm-team-main' });
+      const head = main.createDiv({ cls: 'pm-gap-q' });
+      head.createSpan({ text: `${h.from} → ${h.to} at ` });
+      link(head, h.note);
+      main.createDiv({ cls: 'pm-gap-meta', text: `${clock(h.t)}${h.task ? ` · ${h.task}` : ''} · trail of ${h.trail.length} note${h.trail.length === 1 ? '' : 's'}` });
+      const acts = row.createDiv({ cls: 'pm-team-actions' });
+      const view = acts.createEl('button', { cls: 'plexus-log-more', text: this.openPack === h.id ? 'Hide pack' : 'View pack' });
+      const trail = acts.createEl('button', { cls: 'plexus-log-more', text: 'Show trail' });
+      trail.addEventListener('click', () => this.host.showTrail(h));
+      view.addEventListener('click', () => { this.openPack = this.openPack === h.id ? null : h.id; this.renderTeam(); });
+      if (this.openPack === h.id) {
+        const text = this.host.handoffPack(h);
+        const box = hand.createDiv({ cls: 'pm-pack' });
+        box.createEl('pre', { text });
+        const copy = box.createEl('button', { cls: 'plexus-log-more', text: 'Copy pack' });
+        copy.addEventListener('click', async () => { await navigator.clipboard.writeText(text); copy.setText('Copied'); });
+      }
+    }
+
+    const tasks = this.host.agentTasks().filter((x) => x.status !== 'done' || Date.now() - (x.done ?? 0) < 86_400_000);
+    const tc = this.card(el, 'pm-gap', `Tasks for agents · ${tasks.filter((x) => x.status !== 'done').length} open`, 'list-checks');
+    tc.createDiv({ cls: 'pm-gap-why', text: 'Work agents can pick up: made from the gap radar (Gaps → Make task), or proposed by an agent and waiting for your approval. Agents claim one with POST /tasks/claim and finish it with POST /tasks/done.' });
+    if (!tasks.length) tc.createDiv({ cls: 'pm-empty', text: 'No tasks yet.' });
+    for (const x of tasks) {
+      const row = tc.createDiv({ cls: 'pm-gap-row pm-team-row' });
+      if (x.agent) row.style.setProperty('--agent', colorOf(this.host.agents(), x.agent));
+      const main = row.createDiv({ cls: 'pm-team-main' });
+      const head = main.createDiv({ cls: 'pm-gap-q', text: x.title });
+      if (x.path) { head.appendText(' · '); link(head, x.path); }
+      const state = x.status === 'proposed' ? `proposed by ${x.by}, needs your approval` : x.status === 'open' ? 'open: any agent can claim it' : x.status === 'claimed' ? `claimed by ${x.agent} ${clock(x.claimed ?? x.created)}` : `done by ${x.agent} ${clock(x.done ?? x.created)}${x.result ? ` · ${x.result.slice(0, 80)}` : ''}`;
+      main.createDiv({ cls: 'pm-gap-meta', text: state });
+      const acts = row.createDiv({ cls: 'pm-team-actions' });
+      if (x.status === 'proposed') acts.createEl('button', { cls: 'plexus-log-more', text: 'Approve' }).addEventListener('click', () => this.host.approveTask(x.id));
+      acts.createEl('button', { cls: 'plexus-log-more', text: x.status === 'done' ? 'Clear' : 'Remove' }).addEventListener('click', () => this.host.removeTask(x.id));
+    }
+
+    const brief = this.card(el, 'pm-gap', 'Daily brief', 'newspaper');
+    brief.createDiv({ cls: 'pm-gap-why', text: `Every morning after ${String(t.briefHour).padStart(2, '0')}:00, H!V3MYND writes a note about the previous day of agent work into “${t.briefFolder}”: busiest areas, what each agent did, handoffs, gaps and notes to double-check, with a 30-second time-lapse of the brain.` });
+    brief.createDiv({ cls: 'pm-gap-meta', text: t.lastBrief ? `Last brief: ${t.lastBrief}` : 'No brief written yet.' });
+    const now = brief.createEl('button', { cls: 'plexus-log-more', text: 'Write today\u2019s brief now' });
+    now.addEventListener('click', async () => {
+      now.setText('Writing… (records a 30 s time-lapse)');
+      now.disabled = true;
+      const path = await this.host.writeBriefNow();
+      now.disabled = false;
+      now.setText('Write today\u2019s brief now');
+      if (path) this.host.openNote(path, 'other');
+    });
   }
 
   // ------------------------------------------------------------ task context map
@@ -415,6 +550,36 @@ export class AccessLogView extends ItemView {
       a.addEventListener('click', (ev) => { ev.preventDefault(); this.host.openNote(path, 'other'); });
       return a;
     };
+
+    const radarBox = this.gapsEl.createDiv({ cls: 'pm-radar' });
+    radarBox.createDiv({ cls: 'pm-empty', text: 'Ranking this week\u2019s gaps…' });
+    void this.host.radar().then((r) => {
+      radarBox.empty();
+      const top = this.card(radarBox, 'pm-gap pm-gap-top', 'Gap radar · top 5 this week', 'radar');
+      top.createDiv({ cls: 'pm-gap-why', text: 'What the vault is missing, ranked by how much agent time it cost: searches that kept coming back empty, and thin notes agents kept going back to. Thin ones show as dashed outlines in the brain.' });
+      if (!r.gaps.length) top.createDiv({ cls: 'pm-empty', text: 'No gaps this week.' });
+      for (const g of r.gaps.slice(0, 5)) {
+        const row = top.createDiv({ cls: 'pm-gap-row pm-team-row' });
+        const main = row.createDiv({ cls: 'pm-team-main' });
+        if (g.path) openLink(main, g.path); else main.createDiv({ cls: 'pm-gap-q', text: `“${g.title}”` });
+        main.createDiv({ cls: 'pm-gap-meta', text: `${g.kind === 'missing' ? 'missing' : 'thin'} · ${g.detail} · ${g.agents.join(', ')}` });
+        const acts = row.createDiv({ cls: 'pm-team-actions' });
+        const b = acts.createEl('button', { cls: 'plexus-log-more', text: g.path ? 'Open' : 'Draft starter note' });
+        b.addEventListener('click', () => void this.host.draftStub(g));
+        const mk = acts.createEl('button', { cls: 'plexus-log-more', text: 'Make task' });
+        mk.addEventListener('click', () => { this.host.makeTask(g); mk.setText('Task made'); mk.disabled = true; });
+      }
+      const trust = this.card(radarBox, 'pm-gap', 'Notes to double-check · trust this week', 'shield-alert');
+      trust.createDiv({ cls: 'pm-gap-why', text: 'Notes agents used this week that may not be reliable: old, re-read over and over, or with agent edits you undid. Agents get a warning before they rely on one scoring under 40.' });
+      if (!r.trust.length) trust.createDiv({ cls: 'pm-empty', text: 'Every note agents used this week looks reliable.' });
+      for (const x of r.trust.slice(0, 12)) {
+        const row = trust.createDiv({ cls: 'pm-gap-row pm-team-row' });
+        const main = row.createDiv({ cls: 'pm-team-main' });
+        openLink(main, x.path);
+        main.createDiv({ cls: 'pm-gap-meta', text: x.trust.reasons.join(' · ') || 'minor issues' });
+        row.createDiv({ cls: `pm-trust pm-trust-${x.trust.band}`, text: String(x.trust.score) });
+      }
+    });
 
     const misses = this.card(this.gapsEl, 'pm-gap', 'Searches that found nothing', 'search-x');
     misses.createDiv({ cls: 'pm-gap-why', text: 'An agent looked for this in the vault and came back empty, so the knowledge may be missing or filed under different words.' });

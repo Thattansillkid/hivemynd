@@ -29,8 +29,11 @@ export class ChangeStore {
       if (!(await this.adapter.exists(this.dir))) await this.adapter.mkdir(this.dir);
       const { files } = await this.adapter.list(this.dir);
       const recent = files.filter((f) => f.endsWith('.jsonl')).sort().slice(-3);
+      // Only the newest records are kept in memory, so read just the end of each file.
+      // (A busy day's file can be tens of megabytes; reading it whole on every load
+      // crashed Obsidian's window after a few plugin reloads.)
       for (const f of recent) {
-        for (const line of (await this.adapter.read(f)).split('\n')) {
+        for (const line of (await this.readTail(f, 6_000_000)).split('\n')) {
           if (!line.trim()) continue;
           try { this.records.push(JSON.parse(line)); } catch { /* torn line */ }
         }
@@ -40,6 +43,71 @@ export class ChangeStore {
     } catch (err) {
       console.warn('H!V3MYND: could not load change history', err);
     }
+  }
+
+  /** Every recorded change grouped by note, across all days (for authorship). */
+  async indexByPath(): Promise<Map<string, ChangeRecord[]>> {
+    const out = new Map<string, ChangeRecord[]>();
+    // Keep only what authorship needs: the lines each change added. Stored as a record
+    // with no "before", so every line in "after" counts as added. Full copies of every
+    // note version would cost tens of megabytes.
+    const add = (c: ChangeRecord) => {
+      if (c.after === null) return;
+      const before = new Set((c.before ?? '').split('\n').map((l) => l.trim()));
+      const added = c.after.split('\n').filter((l) => l.trim() && !before.has(l.trim()));
+      const l = out.get(c.path) ?? [];
+      l.push({ id: c.id, t: c.t, agent: c.agent, path: c.path, purpose: '', source: '', before: null, after: added.join('\n') });
+      out.set(c.path, l);
+    };
+    try {
+      const { files } = await this.adapter.list(this.dir);
+      for (const f of files.filter((x) => x.endsWith('.jsonl'))) await this.eachLine(f, (line) => { try { add(JSON.parse(line)); } catch { /* torn line */ } });
+    } catch { /* no history yet */ }
+    this.onChange(add);
+    return out;
+  }
+
+  private fs(): any {
+    const base = (this.adapter as { getBasePath?: () => string }).getBasePath?.();
+    const req = (window as unknown as { require?: (m: string) => unknown }).require;
+    return base && req ? { fs: req('fs'), base } : null;
+  }
+
+  /** The last `bytes` of a file (starting at a line boundary). */
+  private async readTail(path: string, bytes: number): Promise<string> {
+    const h = this.fs();
+    if (!h) return this.adapter.read(path);
+    const full = `${h.base}/${path}`;
+    const size = h.fs.statSync(full).size;
+    if (size <= bytes) return this.adapter.read(path);
+    const fd = h.fs.openSync(full, 'r');
+    try {
+      const buf = new Uint8Array(bytes);
+      h.fs.readSync(fd, buf, 0, bytes, size - bytes);
+      const text = new TextDecoder().decode(buf);
+      return text.slice(text.indexOf('\n') + 1);
+    } finally { h.fs.closeSync(fd); }
+  }
+
+  /** Call `fn` for each line of a file without holding the whole file in memory. */
+  private async eachLine(path: string, fn: (line: string) => void) {
+    const h = this.fs();
+    if (!h) { for (const l of (await this.adapter.read(path)).split('\n')) if (l.trim()) fn(l); return; }
+    const fd = h.fs.openSync(`${h.base}/${path}`, 'r');
+    try {
+      const chunk = new Uint8Array(1 << 20);
+      const dec = new TextDecoder();
+      let rest = '';
+      for (;;) {
+        const n = h.fs.readSync(fd, chunk, 0, chunk.length, null);
+        if (!n) break;
+        const parts = (rest + dec.decode(chunk.subarray(0, n), { stream: true })).split('\n');
+        rest = parts.pop() ?? '';
+        for (const l of parts) if (l.trim()) fn(l);
+        await new Promise((r) => window.setTimeout(r, 0)); // let the window breathe
+      }
+      if (rest.trim()) fn(rest);
+    } finally { h.fs.closeSync(fd); }
   }
 
   onChange(fn: (c: ChangeRecord) => void) {

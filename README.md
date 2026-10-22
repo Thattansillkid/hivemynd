@@ -8,7 +8,9 @@ Hivemynd is the name in Obsidian's community plugins; H!V3MYND is the brand. Fre
 
 ## Features
 
-- **The brain:** a GPU-rendered 3D graph of your vault with neuron firing, depth of field and bloom; full screen; light and dark themes.
+- **The brain:** a GPU-rendered 3D graph of your vault with neuron firing, depth of field and bloom; full screen.
+- **Looks:** ten themes (Multiverse, Inkblot, Mycelium, Lifeblood, Matrix and more), eleven brain shapes, a clustering slider, agent orbits, and Randomize, which morphs between looks on a timer. All looks only: your notes and layout never change.
+- **Cinematic camera and span:** an endless flythrough, and one brain spread across several monitors.
 - **Agent trails:** every read, write and search by an agent lights a path in its colour, with lightning from the agent's satellite into the note.
 - **Brain Monitor:** a separate, modular window. Move, resize and hide its panels: agent status, alerts, context budget (day, week, month, year), activity lanes, hot notes, and a full access log with filters.
 - **Replay and time-lapse:** scrub back through agent activity, or watch the vault grow note by note.
@@ -16,6 +18,7 @@ Hivemynd is the name in Obsidian's community plugins; H!V3MYND is the brand. Fre
 - **Meaning map:** lay the brain out by topic instead of links (computed locally).
 - **Daily brain report:** a summary note per day: who did what, most-used notes, alerts, re-reads, searches that found nothing.
 - **Context packs:** agents can ask for the notes most relevant to a task, trimmed to a token budget.
+- **Agent teamwork:** claims (agents warned or blocked from editing a note another agent is working on), handoff packs, trust scores, a gap radar, tasks for agents, a secret scanner, and an optional daily brief with a time-lapse.
 - **Permissions:** per-agent hidden folders and read-only, enforced by the optional bridge. Bridges you extend with PC actions can ask you to approve each one.
 - **Optional extras (off by default):** music reactivity, phone alerts, a read-only web viewer for other devices.
 
@@ -58,6 +61,7 @@ Obsidian asks plugins to disclose these. Here is everything H!V3MYND does beyond
 | Runs `nvidia-smi` | While the Brain Monitor is open | Shows GPU load in the System panel. Skipped silently if not present. |
 | Captures system audio | Only when you turn on music reactivity | Local analysis to animate the brain. Nothing is recorded or sent. |
 | HTTPS POST to your ntfy, Discord or webhook URL | Only if you turn on phone alerts | Sends the alert line (never note contents) to the address you choose. |
+| Sends short lines to the bridge's `glasses` inbox | Only if you turn on the glasses feed | Puts the daily brief summary and approval requests on Even G2 glasses through your own bridge. Reads the sender's token from the bridge token file you choose, at send time; it is never stored. |
 | Local web server on port 27184 | Only if you turn on the web viewer | Serves a read-only view of the brain (note names and links, never note contents) with its own key. Local network access is a separate opt-in. |
 
 No telemetry, no analytics, no accounts, and nothing is sent anywhere by default. Keys and webhook URLs are kept in Obsidian's SecretStorage, not in plugin settings.

@@ -33,6 +33,10 @@ export class ReplayBar {
   private lastTick = 0;
   private dragging = false;
   private rangeSelect!: HTMLSelectElement;
+  /** One agent only ('' = all), and a chosen calendar day for the "Pick a day" range. */
+  private agent = '';
+  private agentSelect!: HTMLSelectElement;
+  private dayInput!: HTMLInputElement;
 
   constructor(parent: HTMLElement, private host: ReplayHost) {
     this.el = parent.createDiv({ cls: 'plexus-replay' });
@@ -49,8 +53,17 @@ export class ReplayBar {
     speed.addEventListener('change', () => { this.speed = Number(speed.value); });
     const range = (this.rangeSelect = controls.createEl('select', { cls: 'plexus-replay-select', attr: { 'aria-label': 'Range' } }));
     for (const r of Object.keys(RANGES)) range.createEl('option', { text: `Last ${r}`, value: r });
+    range.createEl('option', { text: 'Pick a day', value: 'day' });
     range.value = this.range;
-    range.addEventListener('change', () => { this.range = range.value; void this.load(); });
+    range.addEventListener('change', () => { this.range = range.value; this.dayInput.toggle(this.range === 'day'); void this.load(); });
+    // A single day: watch one agent's (or every agent's) actions from that day.
+    this.dayInput = controls.createEl('input', { cls: 'plexus-replay-select', attr: { type: 'date', 'aria-label': 'Day to replay' } });
+    this.dayInput.value = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+    this.dayInput.toggle(false);
+    this.dayInput.addEventListener('change', () => void this.load());
+    this.agentSelect = controls.createEl('select', { cls: 'plexus-replay-select', attr: { 'aria-label': 'Agent' } });
+    this.agentSelect.createEl('option', { text: 'All agents', value: '' });
+    this.agentSelect.addEventListener('change', () => { this.agent = this.agentSelect.value; void this.load(); });
     this.clockEl = controls.createDiv({ cls: 'plexus-replay-clock' });
     const live = controls.createEl('button', { cls: 'plexus-replay-live', text: '● Back to live' });
     live.addEventListener('click', () => this.close());
@@ -77,6 +90,7 @@ export class ReplayBar {
     const oldest = recent.length ? Math.min(...recent) : Date.now();
     this.range = Object.keys(RANGES).find((r) => Date.now() - RANGES[r] <= oldest) ?? '7d';
     this.rangeSelect.value = this.range;
+    this.dayInput.toggle(false);
     await this.load();
     this.play();
   }
@@ -97,10 +111,27 @@ export class ReplayBar {
   }
 
   private async load() {
-    this.end = Date.now();
-    this.start = this.end - RANGES[this.range];
-    const all = await this.host.history(Math.ceil(RANGES[this.range] / 86_400_000) + 1);
-    this.entries = all.filter((e) => e.t >= this.start && e.t <= this.end).sort((a, b) => a.t - b.t);
+    let days: number;
+    if (this.range === 'day') {
+      const [y, m, d] = (this.dayInput.value || '').split('-').map(Number);
+      const start = y ? new Date(y, m - 1, d).getTime() : new Date(new Date().toDateString()).getTime();
+      this.start = start;
+      this.end = Math.min(Date.now(), start + 86_400_000);
+      days = Math.ceil((Date.now() - start) / 86_400_000) + 1;
+    } else {
+      this.end = Date.now();
+      this.start = this.end - RANGES[this.range];
+      days = Math.ceil(RANGES[this.range] / 86_400_000) + 1;
+    }
+    const all = (await this.host.history(days)).filter((e) => e.t >= this.start && e.t <= this.end);
+    // Agent picker: everyone seen in this range (keep the current choice if still there).
+    const seen = [...new Set(all.map((e) => e.agent))].sort();
+    this.agentSelect.empty();
+    this.agentSelect.createEl('option', { text: 'All agents', value: '' });
+    for (const a of seen) this.agentSelect.createEl('option', { text: a, value: a });
+    if (this.agent && !seen.includes(this.agent)) this.agent = '';
+    this.agentSelect.value = this.agent;
+    this.entries = all.filter((e) => !this.agent || e.agent === this.agent).sort((a, b) => a.t - b.t);
     // Start where the activity starts, not hours of silence before it.
     this.seek(this.entries.length ? Math.max(this.start, this.entries[0].t - 30_000) : this.start);
   }

@@ -1,5 +1,5 @@
-import { App, FileSystemAdapter, ItemView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, debounce, normalizePath, setIcon } from 'obsidian';
-import { PlexusRenderer, PlexusOptions, DEFAULT_OPTIONS, AudioControls, AudioSource, GraphInput, LayoutCache, TouchMode } from './renderer';
+import { App, FileSystemAdapter, FuzzySuggestModal, ItemView, Menu, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, TFolder, ViewStateResult, WorkspaceLeaf, debounce, normalizePath, requestUrl, setIcon } from 'obsidian';
+import { PlexusRenderer, PlexusOptions, DEFAULT_OPTIONS, AudioControls, AudioSource, GraphInput, LayoutCache, TouchMode, SpanSlice } from './renderer';
 import { PathResolver } from './resolver';
 import { hookToEvents, promptFromHook, PulseEvent, searchMiss } from './hookparse';
 import { AccessAction, AccessEntry, AccessLog, dayKey, noteTitle } from './accesslog';
@@ -16,6 +16,11 @@ import { PhoneAlerts, PhoneFormat, randomTopic } from './phone';
 import { WebViewer } from './webviewer';
 import { meaningLinks } from './semantic';
 import { ReplayBar } from './replay';
+import { Claim, ClaimBoard, Gap, Handoff, Trust, buildBrief, buildHandoffPack, detectHandoff, gapRadar, gapStub, trustScore } from './team';
+import { AgentTask, Authorship, TaskBoard, authorship, findSecrets, maskSecrets, newSecrets } from './extras';
+import { THEMES, chromeAccent, themeById } from './themes';
+import { addGroup, showMenu } from './menus';
+import { SHAPES, shapeById } from './shapes';
 import { AudioReactor, SYSTEM_AUDIO } from './audio';
 
 
@@ -51,9 +56,68 @@ interface PlexusSettings extends PlexusOptions {
   monitorLayout: PanelPos[] | null;
   monitorLayoutVersion: number;
   budgetRange: BudgetRange;
+  /** Cinematic camera: fly through the brain when it opens, and again after idle time. */
+  cinemaOnOpen: boolean;
+  /** Seconds without input before the flythrough resumes (0 = never). */
+  cinemaIdle: number;
+  cinemaSpeed: number;
+  /** Claims: what an agent's pre-write hook hears when another agent holds the note. */
+  claimMode: 'warn' | 'block' | 'off';
+  /** How long an agent's edit keeps the note claimed (minutes). */
+  claimMinutes: number;
+  /** Agents whose pre-write hook understands H!V3MYND's reply (Claude Code's format). */
+  hookReplies: string;
+  handoffs: boolean;
+  trustWarnings: boolean;
+  /** Daily brief: a note about yesterday's agent work, written each morning. */
+  briefEnabled: boolean;
+  briefHour: number;
+  briefFolder: string;
+  briefTimelapse: boolean;
+  timelapseKeepDays: number;
+  /** YYYY-MM-DD of the last day a brief was written for. */
+  lastBrief: string;
+  /** Where gap-radar starter notes go. */
+  gapFolder: string;
+  /** F6: lighter rendering for slower machines (no bloom, blur, nebula, marbles, time-lapse). */
+  lowLatency: boolean;
+  /** F3: ring the note each active agent is on right now (not only claimed notes). */
+  presenceRings: boolean;
+  /** F4: what an agent's pre-write hook hears when its edit contains a key or token. */
+  secretScan: 'warn' | 'block' | 'off';
+  /** F4: mask keys and tokens an agent wrote into a note (recorded as a change you can undo). */
+  autoMaskSecrets: boolean;
+  /** F13: push short lines (briefs, approvals) to Even G2 glasses through the Agent Bridge. */
+  glassesFeed: boolean;
+  bridgeUrl: string;
+  bridgeTokenFile: string;
+  glassesSender: string;
+  glassesRecipient: string;
+  /** Span across monitors: the monitors taking part (Electron display ids; empty = all). */
+  spanMonitors: string[];
+  /** The centre monitor: it leads the camera and carries the toolbar ('' = primary). */
+  spanCenter: string;
   /** Light theme for the brain view and for the Brain Monitor (each has its own toggle). */
   brainLight: boolean;
   monitorLight: boolean;
+  /** Brain theme (multiverse, inkblot, violet-dusk, ...). brainLight follows it. */
+  brainTheme: string;
+  /** Brain Monitor theme. monitorLight follows it. */
+  monitorTheme: string;
+  /** Brain shape (default, sphere, diamond, ...): a look only. */
+  brainShape: string;
+  /** Clustering, -1 (spread) .. 0 (as laid out) .. 1 (tight): a look only. */
+  brainCluster: number;
+  /** Shape cycle: morph to the next shape every N seconds (0 = off). */
+  shapeCycle: number;
+  /** How agent satellites orbit the brain (default, solar, atom, close, far, still). */
+  agentOrbit: string;
+  /** Orbit path colour: 'default' (agent colours), 'rainbow', or a hex colour. */
+  orbitColor: string;
+  /** Randomize: a new colour theme, shape, orbit, orbit colour and clustering every interval. */
+  randomizeOn: boolean;
+  /** Seconds between randomized looks. */
+  randomizeInterval: number;
   /** Phone alerts (off by default): see phone.ts. */
   phoneAlerts: boolean;
   phoneUrl: string;
@@ -95,6 +159,8 @@ interface PlexusSettings extends PlexusOptions {
   musicMidGain: number;
   musicHighGain: number;
   musicPalette: string;
+  /** Light-show colour: 'default' (the palette's multicolour), 'rainbow' or a hex colour. */
+  musicColor: string;
   musicBassCutoff: number;
   musicBassSensitivity: number;
 }
@@ -135,6 +201,41 @@ const DEFAULT_SETTINGS: PlexusSettings = {
   monitorLayoutVersion: 0,
   budgetRange: 'day',
   brainLight: false,
+  brainTheme: '',
+  monitorTheme: '',
+  brainShape: 'default',
+  brainCluster: 0,
+  shapeCycle: 0,
+  agentOrbit: 'default',
+  orbitColor: 'default',
+  randomizeOn: false,
+  randomizeInterval: 60,
+  cinemaOnOpen: true,
+  cinemaIdle: 60,
+  cinemaSpeed: 1,
+  spanMonitors: [],
+  spanCenter: '',
+  claimMode: 'warn',
+  claimMinutes: 20,
+  hookReplies: 'claude',
+  handoffs: true,
+  trustWarnings: true,
+  briefEnabled: false, // opt-in: it writes a note (and a video) every day
+  briefHour: 6,
+  briefFolder: 'H!V3MYND/Briefs',
+  briefTimelapse: true,
+  timelapseKeepDays: 14,
+  lastBrief: '',
+  gapFolder: 'H!V3MYND/Gaps',
+  lowLatency: false,
+  presenceRings: true,
+  secretScan: 'warn',
+  autoMaskSecrets: true,
+  glassesFeed: false,
+  bridgeUrl: 'http://127.0.0.1:8787',
+  bridgeTokenFile: '',
+  glassesSender: 'claude',
+  glassesRecipient: 'glasses',
   monitorLight: false,
   phoneAlerts: false,
   phoneUrl: '',
@@ -169,6 +270,7 @@ const DEFAULT_SETTINGS: PlexusSettings = {
   musicMidGain: 1,
   musicHighGain: 1,
   musicPalette: 'Neon',
+  musicColor: 'default',
   musicBassCutoff: 80, // the brain pulses on every low hit at or below this frequency
   musicBassSensitivity: 1,
 };
@@ -209,7 +311,34 @@ export default class PlexusPlugin extends Plugin {
   phone!: PhoneAlerts;
   viewer!: WebViewer;
 
+  /** Developer mode: a synchronous start-up trace (survives a crash), in the plugin folder. */
+  trace(stage: string) {
+    if (!this.settings.developerMode) return;
+    try {
+      const adapter = this.app.vault.adapter;
+      if (!(adapter instanceof FileSystemAdapter)) return;
+      const fs = (window as unknown as { require: (m: string) => { appendFileSync(p: string, s: string): void } }).require('fs');
+      fs.appendFileSync(`${adapter.getBasePath()}/${this.manifest.dir}/load-trace.txt`, `${new Date().toISOString()} ${stage}
+`);
+    } catch { /* tracing must never break loading */ }
+  }
+
   async onload() {
+    this.trace('onload start');
+    const onErr = (e: ErrorEvent | PromiseRejectionEvent) => this.trace(`window error: ${'reason' in e ? String((e.reason as Error)?.stack ?? e.reason) : (e.error?.stack ?? e.message)}`.slice(0, 2000));
+    window.addEventListener('error', onErr);
+    window.addEventListener('unhandledrejection', onErr);
+    window.setTimeout(() => { window.removeEventListener('error', onErr); window.removeEventListener('unhandledrejection', onErr); this.trace('trace window closed'); }, 30_000);
+    try {
+      await this.onloadInner();
+      this.trace('onload done');
+    } catch (err) {
+      this.trace(`onload FAILED: ${err instanceof Error ? err.stack : String(err)}`.slice(0, 3000));
+      throw err;
+    }
+  }
+
+  private async onloadInner() {
     await this.loadSettings();
     // Keep the bridge's policy file in step with these settings from the start.
     this.writePolicies();
@@ -220,12 +349,16 @@ export default class PlexusPlugin extends Plugin {
     await this.loadBridgeMessages();
     await this.loadMisses();
     await this.loadPurposes();
+    await this.loadTeam();
+    this.applyShapeCycle();
+    this.applyRandomize();
     this.phone = new PhoneAlerts(() => this.settings);
     this.alertListeners.add((c) => this.phone.notify(c));
     this.viewer = new WebViewer({ graph: () => this.viewerGraph(), keyOk: (k) => safeEqual(this.settings.viewerKey, k) });
     this.startViewer();
     // Right-click a note or folder to add it to (or remove it from) the watchlist.
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
+      if (!(file instanceof TFile)) menu.addItem((item) => item.setTitle('Focus the brain on this folder').setIcon('scan-eye').onClick(() => this.focusProject(file.path)));
       const prefix = file instanceof TFile ? file.path : `${file.path.replace(/\/+$/, '')}/`;
       const watched = parseWatchlist(this.settings.watchlist).some((r) => r.prefix === prefix);
       menu.addItem((item) => item.setTitle(watched ? 'Stop watching in H!V3MYND' : 'Watch in H!V3MYND').setIcon(watched ? 'eye-off' : 'eye').onClick(async () => {
@@ -260,16 +393,29 @@ export default class PlexusPlugin extends Plugin {
       focusTask: (notes, agent) => this.focusTask(notes, agent),
       exportTask: (t) => this.exportTask(t),
       gaps: () => this.gapData(),
+      team: () => ({ claims: this.claims.list(), handoffs: [...this.handoffs].reverse(), lastBrief: this.settings.lastBrief, briefFolder: this.settings.briefFolder, briefHour: this.settings.briefHour, claimMode: this.settings.claimMode }),
+      onTeam: (fn) => { this.teamListeners.add(fn); return () => this.teamListeners.delete(fn); },
+      releaseClaim: (path) => this.claims.releasePath(path),
+      handoffPack: (h) => this.handoffPackFor(h.from, h.to, h.task),
+      showTrail: (h) => this.showTrail(h),
+      writeBriefNow: () => this.writeBrief(new Date(), true),
+      radar: () => this.radarData(),
+      draftStub: (g) => this.draftStub(g),
+      agentTasks: () => this.tasks.list(),
+      makeTask: (g) => { void this.makeTask(g); },
+      approveTask: (id) => { this.tasks.update(id, { status: 'open' }); },
+      removeTask: (id) => this.tasks.remove(id),
       restore: (c) => this.confirmRestore(c),
       bridge: () => this.bridgeMessages,
       onBridge: (fn) => { this.bridgeListeners.add(fn); return () => this.bridgeListeners.delete(fn); },
       alias: (n) => this.alias(n),
       // Layouts saved before the current default (LAYOUT_VERSION) start fresh.
-      monitorUi: () => ({ layout: this.settings.monitorLayoutVersion === LAYOUT_VERSION ? this.settings.monitorLayout : null, budgetRange: this.settings.budgetRange, light: this.settings.monitorLight }),
+      monitorUi: () => ({ layout: this.settings.monitorLayoutVersion === LAYOUT_VERSION ? this.settings.monitorLayout : null, budgetRange: this.settings.budgetRange, light: this.settings.monitorLight, theme: this.settings.monitorTheme }),
       saveMonitorUi: (p) => {
         if (p.layout) { this.settings.monitorLayout = p.layout; this.settings.monitorLayoutVersion = LAYOUT_VERSION; }
         if (p.budgetRange) this.settings.budgetRange = p.budgetRange;
         if (p.light !== undefined) this.settings.monitorLight = p.light;
+        if (p.theme !== undefined) { this.settings.monitorTheme = p.theme; this.settings.monitorLight = themeById(p.theme).light; }
         void this.saveData(this.settings);
       },
     }));
@@ -301,6 +447,9 @@ export default class PlexusPlugin extends Plugin {
       this.writePolicies();
       new Notice(this.settings.enforcePermissions ? 'H!V3MYND: agent permissions ON (approvals and rules enforced)' : 'H!V3MYND: agent permissions OFF (agents unrestricted; protected paths still apply)', 6000);
     } });
+    this.addCommand({ id: 'low-latency', name: 'Toggle low-latency mode', callback: () => void this.toggleLowLatency() });
+    this.addCommand({ id: 'focus-project', name: 'Focus the brain on a project (folder)', callback: () => this.pickProject() });
+    this.addCommand({ id: 'cinematic-camera', name: 'Toggle cinematic camera', callback: () => this.views()[0]?.toggleCinema() });
     this.addCommand({ id: 'meaning-map', name: 'Toggle meaning map (arrange by topic)', callback: () => void this.toggleMeaning() });
     this.addCommand({ id: 'growth', name: 'Play vault growth time-lapse', callback: async () => { await this.activate(); this.views()[0]?.toggleGrowth(); } });
     this.addCommand({ id: 'brain-report', name: "Write today's brain report (so far)", callback: async () => {
@@ -439,7 +588,630 @@ export default class PlexusPlugin extends Plugin {
     }
   }
 
+  // ---------------------------------------------------------------- teamwork
+  // Claims, handoffs, trust warnings, gap radar and the daily brief (logic in team.ts).
+
+  claims!: ClaimBoard;
+  handoffs: Handoff[] = [];
+  private teamListeners = new Set<() => void>();
+  private bumps = new Map<string, number>();
+  private week: { at: number; entries: AccessEntry[] } | null = null;
+  private radarCache: { at: number; gaps: Gap[] } | null = null;
+
+  private teamDir() { return `${this.manifest.dir}/team`; }
+
+  private async loadTeam() {
+    const a = this.app.vault.adapter;
+    const dir = this.teamDir();
+    try { if (!(await a.exists(dir))) await a.mkdir(dir); } catch { /* ignore */ }
+    const saveClaims = debounce((list: Claim[]) => void a.write(`${dir}/claims.json`, JSON.stringify(list)).catch(() => null), 1000, true);
+    this.claims = new ClaimBoard(saveClaims);
+    try { if (await a.exists(`${dir}/claims.json`)) this.claims.load(JSON.parse(await a.read(`${dir}/claims.json`))); } catch { /* fresh */ }
+    try {
+      if (await a.exists(`${dir}/handoffs.jsonl`)) {
+        for (const line of (await a.read(`${dir}/handoffs.jsonl`)).split('\n')) {
+          if (!line.trim()) continue;
+          try { this.handoffs.push(JSON.parse(line)); } catch { /* torn line */ }
+        }
+        this.handoffs = this.handoffs.slice(-200);
+      }
+    } catch { /* fresh */ }
+    this.claims.onChange(() => { this.refreshMarkers(); this.teamChanged(); });
+    const saveTasks = debounce((list: AgentTask[]) => void a.write(`${dir}/tasks.json`, JSON.stringify(list)).catch(() => null), 800, true);
+    this.tasks = new TaskBoard(saveTasks);
+    try { if (await a.exists(`${dir}/tasks.json`)) this.tasks.load(JSON.parse(await a.read(`${dir}/tasks.json`))); } catch { /* fresh */ }
+    this.tasks.onChange(() => this.teamChanged());
+    // F3: presence rings follow active agents around the brain.
+    this.registerInterval(window.setInterval(() => { if (this.settings.presenceRings) this.refreshMarkers(); }, 15_000));
+    // F12: authorship badge for the open note in the status bar.
+    this.statusEl = this.addStatusBarItem();
+    this.statusEl.addClass('plexus-author-badge');
+    this.registerDomEvent(this.statusEl, 'click', () => void this.explainAuthorship());
+    this.registerEvent(this.app.workspace.on('file-open', () => void this.updateStatusBadge()));
+    this.changes.onChange((c) => { this.authorCache.delete(c.path); void this.updateStatusBadge(); });
+    // Daily brief: check every 10 minutes (and shortly after start) whether one is due.
+    this.registerInterval(window.setInterval(() => void this.maybeBrief(), 10 * 60_000));
+    this.app.workspace.onLayoutReady(() => window.setTimeout(() => void this.maybeBrief(), 90_000));
+  }
+
+  private teamChanged() {
+    for (const fn of this.teamListeners) fn();
+  }
+
+  agentColor(name: string) {
+    const a = this.settings.agents;
+    return (a.find((x) => x.name === name) ?? a.find((x) => x.name === 'other'))?.color ?? '#2fd3c9';
+  }
+
+  private hookReplyAgents() {
+    return new Set(this.settings.hookReplies.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+  }
+
+  /** The last 7 days of the access log, cached for half an hour. */
+  private weekEntries(): AccessEntry[] {
+    if (!this.week || Date.now() - this.week.at > 30 * 60_000) {
+      const stale = this.week;
+      this.week = { at: Date.now(), entries: stale?.entries ?? this.log.entries };
+      void this.log.history(7).then((entries) => { this.week = { at: Date.now(), entries }; });
+    }
+    return this.week.entries;
+  }
+
+  private noteFacts(path: string) {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    return f instanceof TFile ? { mtime: f.stat.mtime, size: f.stat.size } : null;
+  }
+
+  trustOf(path: string): Trust {
+    return trustScore(path, this.noteFacts(path), this.weekEntries(), this.changes.records);
+  }
+
+  /**
+   * What the agent's pre-write hook should hear, if anything: the note is claimed by
+   * another agent, or the agent is about to rely on a note with low trust. In "warn"
+   * mode each warning is given once; retrying the same edit goes through.
+   */
+  private preWriteReply(agent: string, paths: string[], data?: unknown): string | null {
+    const now = Date.now();
+    const parts: string[] = [];
+    // F4: keys and tokens in what the agent is about to write.
+    if (this.settings.secretScan !== 'off' && data && typeof data === 'object') {
+      const text = hookStrings((data as { tool_input?: unknown }).tool_input).join('\n');
+      const hits = findSecrets(text);
+      const key = `secret|${agent}|${paths.join(',')}`;
+      if (hits.length && (this.settings.secretScan === 'block' || now - (this.bumps.get(key) ?? 0) > 10 * 60_000)) {
+        this.bumps.set(key, now);
+        const kinds = [...new Set(hits.map((h) => h.kind))].join(', ');
+        parts.push(`This edit contains what looks like a ${kinds}. Don't save keys or tokens in notes: write [REDACTED] or point to where the secret is stored instead.` +
+          (this.settings.secretScan === 'block' ? '' : ' Retry the same edit only if the user asked for the value to be saved.'));
+      }
+    }
+    const time = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    for (const [k, t] of this.bumps) if (now - t > 3 * 3600_000) this.bumps.delete(k);
+    if (this.settings.claimMode !== 'off') {
+      for (const p of paths) {
+        const c = this.claims.holder(p, now);
+        if (!c || c.agent === agent) continue;
+        const key = `claim|${agent}|${p}`;
+        if (this.settings.claimMode === 'warn' && now - (this.bumps.get(key) ?? 0) < 10 * 60_000) continue;
+        this.bumps.set(key, now);
+        parts.push(`"${noteTitle(p)}" is claimed by ${c.agent}${c.purpose ? ` (working on: ${c.purpose})` : ''} until ${time(c.until)}. ` +
+          `What ${c.agent} did is in its handoff pack: GET http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(c.agent)} (header X-Hivemynd-Key). ` +
+          (this.settings.claimMode === 'block' ? 'Ask the user before editing it, or wait for the claim to end.' : 'Read that and check with the user; retry the same edit to go ahead anyway.'));
+        this.claimConflict(agent, c);
+      }
+    }
+    if (this.settings.trustWarnings) {
+      const sources = new Set(paths);
+      const since = now - 30 * 60_000;
+      for (let i = this.log.entries.length - 1; i >= 0; i--) {
+        const e = this.log.entries[i];
+        if (e.t < since) break;
+        if (e.agent === agent && e.action === 'read') sources.add(e.notes[0]);
+      }
+      for (const p of sources) {
+        const t = this.trustOf(p);
+        if (t.band !== 'low') continue;
+        const key = `trust|${agent}|${p}`;
+        if (now - (this.bumps.get(key) ?? 0) < 2 * 3600_000) continue;
+        this.bumps.set(key, now);
+        parts.push(`Heads-up: "${noteTitle(p)}" has a trust score of ${t.score}/100 (${t.reasons.join('; ') || 'low'}). ` +
+          `${paths.includes(p) ? 'You are about to edit it' : 'You read it earlier in this task'}; make sure it is still right before relying on it. Retry the same edit to go ahead.`);
+        break;
+      }
+    }
+    return parts.length ? `H!V3MYND: ${parts.join(' ')}` : null;
+  }
+
+  private claimConflict(agent: string, c: Claim) {
+    const col: Collision = { t: Date.now(), kind: 'blocked', note: c.path, writer: agent, other: c.agent, otherAt: c.since };
+    this.alerts.push(col);
+    if (this.alerts.length > 200) this.alerts.shift();
+    new Notice(`H!V3MYND: ${agent} tried to edit “${noteTitle(c.path)}”, which ${c.agent} has claimed. It was sent ${c.agent}'s handoff instead.`, 8000);
+    for (const fn of this.alertListeners) fn(col);
+  }
+
+  private checkHandoff(entry: AccessEntry) {
+    const h = detectHandoff(entry, this.log.entries, () => taskGroups(this.log.entries));
+    if (!h) return;
+    const dup = this.handoffs.some((x) => x.from === h.from && x.to === h.to && x.task === h.task && entry.t - x.t < 6 * 3600_000);
+    if (dup) return;
+    const rec: Handoff = { id: `${entry.t.toString(36)}-${h.from}-${h.to}`, ...h };
+    this.handoffs.push(rec);
+    if (this.handoffs.length > 200) this.handoffs.shift();
+    void this.app.vault.adapter.append(`${this.teamDir()}/handoffs.jsonl`, JSON.stringify(rec) + '\n').catch(() => null);
+    new Notice(`H!V3MYND handoff: ${h.to} picked up ${h.from}'s work at “${noteTitle(h.note)}”. The pack is in Brain Monitor → Team.`, 8000);
+    this.showTrail(rec);
+    this.teamChanged();
+  }
+
+  handoffPackFor(from: string, to?: string, task?: string) {
+    return buildHandoffPack({ from, to, task: task || undefined, entries: this.log.entries, changes: this.changes.records, claims: this.claims.list(), misses: this.misses });
+  }
+
+  showTrail(h: Handoff) {
+    const paths = this.getGraph().paths;
+    const idx = [...h.trail, h.note].map((p) => paths.indexOf(p)).filter((i) => i >= 0);
+    for (const v of this.views()) v.renderer?.trail(idx, this.agentColor(h.from));
+  }
+
+  /** Gap radar (ranked) and the least trusted notes agents used this week. */
+  async radarData(): Promise<{ gaps: Gap[]; trust: { path: string; trust: Trust }[] }> {
+    const entries = await this.log.history(7);
+    this.week = { at: Date.now(), entries };
+    const gaps = gapRadar(this.misses, entries, (p) => this.noteFacts(p)?.size ?? null);
+    this.radarCache = { at: Date.now(), gaps };
+    const used = new Set<string>();
+    for (const e of entries) if (e.action !== 'search') used.add(e.notes[0]);
+    const trust = [...used].slice(0, 600).map((p) => ({ path: p, trust: this.trustOf(p) })).filter((x) => x.trust.band !== 'ok')
+      .sort((a, b) => a.trust.score - b.trust.score).slice(0, 25);
+    this.refreshMarkers();
+    return { gaps, trust };
+  }
+
+  /** Claimed notes (agent-coloured rings) and thin notes from the radar (dashed outlines). */
+  refreshMarkers() {
+    const paths = this.getGraph().paths;
+    const list: { index: number; color: string; style: 'claim' | 'gap' }[] = [];
+    const ringed = new Set<string>();
+    for (const c of this.claims?.list() ?? []) { list.push({ index: paths.indexOf(c.path), color: this.agentColor(c.agent), style: 'claim' }); ringed.add(c.path); }
+    // F3 live presence: the note each agent touched in the last 3 minutes.
+    if (this.settings.presenceRings && this.log) {
+      const since = Date.now() - 3 * 60_000;
+      const seen = new Set<string>();
+      for (let i = this.log.entries.length - 1; i >= 0; i--) {
+        const e = this.log.entries[i];
+        if (e.t < since) break;
+        if (e.action === 'search' || seen.has(e.agent) || ringed.has(e.notes[0])) continue;
+        seen.add(e.agent);
+        ringed.add(e.notes[0]);
+        list.push({ index: paths.indexOf(e.notes[0]), color: this.agentColor(e.agent), style: 'claim' });
+      }
+    }
+    for (const g of (this.radarCache?.gaps ?? []).filter((x) => x.path).slice(0, 8)) list.push({ index: paths.indexOf(g.path!), color: '', style: 'gap' });
+    for (const v of this.views()) v.renderer?.setMarkers(list);
+  }
+
+  /** Create a starter note for a gap, then open it. */
+  async draftStub(g: Gap, open = true) {
+    if (g.path) { if (open) void this.app.workspace.openLinkText(g.path, '', 'tab'); return; }
+    const folder = normalizePath(this.settings.gapFolder || 'Gaps');
+    await this.ensureFolder(folder);
+    const name = stubName(g.title) || g.title.replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Gap';
+    const path = normalizePath(`${folder}/${name}.md`);
+    const related = [...new Set(this.misses.filter((m) => m.query.trim().toLowerCase() === g.title.trim().toLowerCase())
+      .flatMap((m) => this.log.entries.filter((e) => e.agent === m.agent && Math.abs(e.t - m.t) < 15 * 60_000 && e.action === 'read').map((e) => e.notes[0])))];
+    if (!this.app.vault.getAbstractFileByPath(path)) await this.app.vault.create(path, gapStub(g, related));
+    if (open) void this.app.workspace.openLinkText(path, '', 'tab');
+  }
+
+  private async ensureFolder(folder: string) {
+    const parts = folder.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const p = parts.slice(0, i).join('/');
+      if (!this.app.vault.getAbstractFileByPath(p)) { try { await this.app.vault.createFolder(p); } catch { /* exists */ } }
+    }
+  }
+
+  // ---- 1.1.0 extras
+
+  tasks!: TaskBoard;
+  private statusEl: HTMLElement | null = null;
+  private authorCache = new Map<string, Authorship>();
+  private changeIndex: Map<string, ChangeRecord[]> | null = null;
+  projectFocus: string | null = null;
+
+  async setOrbitColor(id: string) {
+    this.settings.orbitColor = id;
+    await this.saveData(this.settings);
+    for (const v of this.views()) { const r = v.renderer; r?.crossfade(() => r.setOrbitColor(id)); }
+  }
+
+  async setAgentOrbit(id: string) {
+    this.settings.agentOrbit = id;
+    await this.saveData(this.settings);
+    for (const v of this.views()) { const r = v.renderer; r?.crossfade(() => r.setOrbit(id)); }
+  }
+
+  // Randomize: on a timer, a new colour theme, shape, agent orbit, orbit line colour and
+  // clustering, each different from what's showing.
+  private randomTimer: number | null = null;
+
+  async setRandomize(on: boolean) {
+    this.settings.randomizeOn = on;
+    if (on && this.settings.shapeCycle) { this.settings.shapeCycle = 0; this.applyShapeCycle(); } // the two would fight
+    await this.saveData(this.settings);
+    this.applyRandomize();
+    if (on) await this.shuffleLook();
+    const every = CYCLES.find(([sec]) => sec === this.settings.randomizeInterval)?.[1] ?? `${this.settings.randomizeInterval} s`;
+    new Notice(on ? `H!V3MYND: randomize on, a new look every ${every}.` : 'H!V3MYND: randomize off.', 4000);
+  }
+
+  async setRandomizeInterval(sec: number) {
+    this.settings.randomizeInterval = sec;
+    await this.saveData(this.settings);
+    this.applyRandomize();
+  }
+
+  applyRandomize() {
+    if (this.randomTimer !== null) { window.clearInterval(this.randomTimer); this.randomTimer = null; }
+    if (this.settings.randomizeOn) this.randomTimer = window.setInterval(() => void this.shuffleLook(), Math.max(10, this.settings.randomizeInterval) * 1000);
+  }
+
+  /** Pick something new for every look option at once. */
+  async shuffleLook() {
+    const s = this.settings;
+    const pick = <T,>(list: T[], current: T) => { const rest = list.filter((x) => x !== current); return rest[Math.floor(Math.random() * rest.length)] ?? current; };
+    const theme = pick(THEMES.map((t) => t.id), s.brainTheme);
+    const shape = pick(SHAPES.map((x) => x.id), s.brainShape);
+    const orbit = pick(ORBITS.map(([id]) => id), s.agentOrbit);
+    const orbitColor = pick(ORBIT_COLORS.map(([id]) => id), s.orbitColor);
+    const cluster = pick([-0.5, -0.25, 0, 0.35, 0.7], s.brainCluster);
+    s.brainTheme = theme; s.brainLight = themeById(theme).light;
+    s.brainShape = shape; s.agentOrbit = orbit; s.orbitColor = orbitColor; s.brainCluster = cluster;
+    await this.saveData(s);
+    for (const v of this.views()) {
+      const r = v.renderer;
+      if (!r) continue;
+      // Shape and clustering morph together (one glide); colours, theme effects and
+      // orbits cross-dissolve.
+      r.setShape(shape, true);
+      r.setCluster(cluster, true);
+      r.crossfade(() => { v.applyTheme(); r.setOrbitColor(orbitColor); r.setOrbit(orbit); });
+    }
+  }
+
+  // Shape cycle: every N seconds the brain morphs to the next shape in the list.
+  private cycleTimer: number | null = null;
+
+  async setShapeCycle(sec: number) {
+    this.settings.shapeCycle = sec;
+    if (sec && this.settings.randomizeOn) { this.settings.randomizeOn = false; this.applyRandomize(); } // the two would fight
+    await this.saveData(this.settings);
+    this.applyShapeCycle();
+    new Notice(sec ? `H!V3MYND: shape cycle on, a new shape every ${CYCLES.find(([s]) => s === sec)?.[1] ?? `${sec} s`}.` : 'H!V3MYND: shape cycle off.', 4000);
+  }
+
+  applyShapeCycle() {
+    if (this.cycleTimer !== null) { window.clearInterval(this.cycleTimer); this.cycleTimer = null; }
+    const sec = this.settings.shapeCycle;
+    if (!sec) return;
+    this.cycleTimer = window.setInterval(() => {
+      const i = SHAPES.findIndex((x) => x.id === this.settings.brainShape);
+      void this.setBrainShape(SHAPES[(i + 1) % SHAPES.length].id);
+    }, sec * 1000);
+  }
+
+  /** Switch the brain's shape everywhere; it morphs from the current shape. */
+  async setBrainShape(id: string) {
+    this.settings.brainShape = shapeById(id).id;
+    await this.saveData(this.settings);
+    for (const v of this.views()) v.renderer?.setShape(this.settings.brainShape, true);
+  }
+
+  /** Switch the brain's theme everywhere (every brain view and span monitor). */
+  async setBrainTheme(id: string) {
+    const t = themeById(id);
+    this.settings.brainTheme = t.id;
+    this.settings.brainLight = t.light;
+    await this.saveData(this.settings);
+    for (const v of this.views()) { if (v.renderer) v.renderer.crossfade(() => v.applyTheme()); else v.applyTheme(); }
+  }
+
+  /** F6: apply low-latency mode to every brain view. */
+  applyLowLatency() {
+    for (const v of this.views()) v.renderer?.setLowLatency(this.settings.lowLatency);
+  }
+
+  async toggleLowLatency() {
+    this.settings.lowLatency = !this.settings.lowLatency;
+    await this.saveData(this.settings);
+    this.applyLowLatency();
+    new Notice(`H!V3MYND: low-latency mode ${this.settings.lowLatency ? 'on (lighter effects)' : 'off (full effects)'}.`);
+  }
+
+  /** F15: dim everything except one folder (a project) and the notes it links to. */
+  focusProject(folder: string | null) {
+    this.projectFocus = folder;
+    const g = this.getGraph();
+    if (!folder) { for (const v of this.views()) v.renderer?.setFocus(null); return; }
+    const prefix = folder.replace(/\/+$/, '') + '/';
+    const inside = new Set<number>();
+    g.paths.forEach((p, i) => { if (p.startsWith(prefix)) inside.add(i); });
+    const all = new Set(inside);
+    for (const [a, b] of g.links) { if (inside.has(a)) all.add(b); if (inside.has(b)) all.add(a); }
+    for (const v of this.views()) v.renderer?.setFocus([...all], '#5fe8ff');
+    new Notice(`H!V3MYND focus: ${folder} (${inside.size} notes and ${all.size - inside.size} linked). Press Esc or the focus button to leave.`, 6000);
+  }
+
+  pickProject() {
+    if (this.projectFocus) { this.focusProject(null); return; }
+    new FolderPick(this.app, (f) => this.focusProject(f)).open();
+  }
+
+  /** F12: who wrote the note: its lines credited to agents vs the human. */
+  async authorshipOf(path: string): Promise<Authorship | null> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!(f instanceof TFile) || f.extension !== 'md') return null;
+    const hit = this.authorCache.get(path);
+    if (hit) return hit;
+    if (!this.changeIndex) this.changeIndex = await this.changes.indexByPath();
+    const a = authorship(await this.app.vault.cachedRead(f), this.changeIndex.get(path) ?? []);
+    this.authorCache.set(path, a);
+    return a;
+  }
+
+  /** One line for hover cards and the status bar: agent share and trust. */
+  async noteBadge(path: string) {
+    const a = await this.authorshipOf(path);
+    if (!a || !a.total) return null;
+    const pct = Math.round((a.agent / a.total) * 100);
+    const t = this.trustOf(path);
+    return `${pct ? `${pct}% agent-written` : 'All human-written'} · trust ${t.score}`;
+  }
+
+  private async updateStatusBadge() {
+    if (!this.statusEl) return;
+    const f = this.app.workspace.getActiveFile();
+    const text = f ? await this.noteBadge(f.path) : null;
+    this.statusEl.setText(text ? `🤖 ${text}` : '');
+    this.statusEl.toggle(!!text);
+  }
+
+  private async explainAuthorship() {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) return;
+    const a = await this.authorshipOf(f.path);
+    if (!a) return;
+    const parts = Object.entries(a.byAgent).sort((x, y) => y[1] - x[1]).map(([g, n]) => `${g} ${n}`);
+    const t = this.trustOf(f.path);
+    new Notice(`“${f.basename}”: ${a.total} lines, ${a.human} by you${parts.length ? `, ${parts.join(', ')} by agents` : ''}. Trust ${t.score}/100${t.reasons.length ? ` (${t.reasons.join('; ')})` : ''}.`, 10_000);
+  }
+
+  /** F5: turn a gap from the radar into an approved task agents can claim. */
+  async makeTask(g: Gap) {
+    let path = g.path;
+    if (!path) {
+      await this.draftStub(g, false);
+      path = normalizePath(`${this.settings.gapFolder || 'Gaps'}/${stubName(g.title)}.md`);
+    }
+    const t = this.tasks.add({ title: g.kind === 'missing' ? `Write a note on “${g.title}”` : `Fill out “${g.title}”`, detail: `From the gap radar: ${g.detail}. Agents who hit this: ${g.agents.join(', ')}.`, path, by: 'you', status: 'open' });
+    new Notice(`H!V3MYND: task ready for agents: “${t.title}”. They can claim it with POST /tasks/claim.`, 7000);
+    return t;
+  }
+
+  /** F13: short lines for a heads-up display (agent status, approvals, last answer, brief). */
+  hudLines(): string[] {
+    const out: string[] = [];
+    const since = Date.now() - 10 * 60_000;
+    const last = new Map<string, AccessEntry>();
+    for (const e of this.log.entries) if (e.t >= since && e.action !== 'search') last.set(e.agent, e);
+    for (const [agent, e] of last) out.push(`${agent} ▸ ${noteTitle(e.notes[0])}`.slice(0, 60));
+    const claims = this.claims.list().length;
+    if (claims) out.push(`${claims} note${claims === 1 ? '' : 's'} claimed`);
+    const open = this.tasks.list().filter((t) => t.status === 'proposed').length;
+    if (open) out.push(`${open} task${open === 1 ? '' : 's'} to approve`);
+    if (!out.length) out.push('All quiet');
+    return out;
+  }
+
+  /** F13: send one short line to the glasses through the Agent Bridge (when switched on). */
+  async toGlasses(text: string) {
+    const s = this.settings;
+    if (!s.glassesFeed || !s.bridgeUrl || !s.bridgeTokenFile) return;
+    try {
+      const fs = (window as unknown as { require: (m: string) => { readFileSync(p: string, e: string): string } }).require('fs');
+      const token = JSON.parse(fs.readFileSync(s.bridgeTokenFile, 'utf8'))?.agents?.[s.glassesSender];
+      if (!token) return;
+      await requestUrl({
+        url: `${s.bridgeUrl.replace(/\/+$/, '')}/message`, method: 'POST', contentType: 'application/json', throw: false,
+        headers: { 'X-Bridge-Token': String(token) },
+        body: JSON.stringify({ sender: s.glassesSender, recipient: s.glassesRecipient, body: `H!V3MYND: ${maskSecrets(text).slice(0, 240)}` }),
+      });
+    } catch (err) {
+      console.warn('H!V3MYND: glasses feed failed', err);
+    }
+  }
+
+  // ---- daily brief
+
+  private async maybeBrief() {
+    if (!this.settings.briefEnabled) return;
+    const now = new Date();
+    if (now.getHours() < this.settings.briefHour) return;
+    const y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const key = ymd(y);
+    if (this.settings.lastBrief >= key) return;
+    this.settings.lastBrief = key;
+    await this.saveData(this.settings);
+    await this.writeBrief(y, this.settings.briefTimelapse);
+  }
+
+  /** Write the brief for `day` (today = so far). Returns the note path. */
+  async writeBrief(day: Date, timelapse: boolean): Promise<string | null> {
+    try {
+      const start = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+      const end = start + 86_400_000;
+      const back = Math.max(1, Math.ceil((Date.now() - start) / 86_400_000) + 1);
+      const all = await this.log.history(Math.min(8, back));
+      const entries = all.filter((e) => e.t >= start && e.t < end).sort((a, b) => a.t - b.t);
+      const folder = normalizePath(this.settings.briefFolder || 'H!V3MYND/Briefs');
+      await this.ensureFolder(folder);
+      const key = ymd(day);
+      let tlPath: string | null = null;
+      let tlNote = '';
+      if (timelapse && entries.length && this.settings.lowLatency) tlNote = 'Time-lapse skipped: low-latency mode is on.';
+      else if (timelapse && entries.length) {
+        const view = this.views().find((v) => !v.spanRole && v.renderer && !v.renderer.paused && v.containerEl.ownerDocument.visibilityState === 'visible');
+        if (!view) tlNote = 'Time-lapse skipped: the brain view was not open.';
+        else {
+          new Notice('H!V3MYND: recording a 30-second time-lapse of the day for the brief…', 5000);
+          const buf = await view.recordTimelapse(entries, 30);
+          if (buf) {
+            tlPath = normalizePath(`${folder}/${key} time-lapse.webm`);
+            const old = this.app.vault.getAbstractFileByPath(tlPath);
+            if (old instanceof TFile) await this.app.vault.modifyBinary(old, buf);
+            else await this.app.vault.createBinary(tlPath, buf);
+          } else tlNote = 'Time-lapse skipped: this system could not record the brain.';
+        }
+      }
+      const radar = await this.radarData();
+      const notesThatDay = [...new Set(entries.filter((e) => e.action !== 'search').map((e) => e.notes[0]))];
+      const lowTrust = notesThatDay.slice(0, 400).map((p) => ({ path: p, trust: this.trustOf(p) })).filter((x) => x.trust.band === 'low').sort((a, b) => a.trust.score - b.trust.score);
+      const md = buildBrief({ day, entries, changes: this.changes.records, handoffs: this.handoffs, collisions: this.alerts, gaps: radar.gaps, lowTrust, timelapse: tlPath, timelapseNote: tlNote });
+      const path = normalizePath(`${folder}/${key} Brain brief.md`);
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) await this.app.vault.modify(f, md);
+      else await this.app.vault.create(path, md);
+      await this.pruneTimelapses(folder);
+      new Notice(`H!V3MYND: brain brief for ${key} is ready (${path}).`, 8000);
+      const short = /## In short\n([^\n]+)/.exec(md)?.[1];
+      if (short) void this.toGlasses(`Brief ${key}: ${short.replace(/\*\*/g, '')}`);
+      this.teamChanged();
+      return path;
+    } catch (err) {
+      console.error('H!V3MYND: brief failed', err);
+      new Notice(`H!V3MYND: couldn't write the brain brief (${err instanceof Error ? err.message : err}).`);
+      return null;
+    }
+  }
+
+  /** Time-lapse videos are big: keep only the last few days (old ones go to the trash). */
+  private async pruneTimelapses(folder: string) {
+    const keep = Math.max(1, this.settings.timelapseKeepDays);
+    const cutoff = ymd(new Date(Date.now() - keep * 86_400_000));
+    const dir = this.app.vault.getAbstractFileByPath(folder);
+    if (!dir || !('children' in dir)) return;
+    for (const f of [...(dir as { children: unknown[] }).children]) {
+      if (!(f instanceof TFile) || !/^\d{4}-\d{2}-\d{2} time-lapse\.webm$/.test(f.name)) continue;
+      if (f.name.slice(0, 10) < cutoff) await this.app.fileManager.trashFile(f);
+    }
+  }
+
+  // ---------------------------------------------------------------- span across monitors
+  // One full-screen pop-out per chosen monitor, each showing its slice of one picture.
+  // The centre monitor's view leads (camera, flythrough, layout); the others follow it.
+
+  spanning = false;
+  private spanLeaves: WorkspaceLeaf[] = [];
+  private endingSpan = false;
+
+  /** Monitors as Electron reports them, or [] when that isn't available (mobile, web). */
+  displays(): SpanDisplay[] {
+    const remote = electronRemote();
+    if (!remote) return [];
+    const primary = remote.screen.getPrimaryDisplay().id;
+    return remote.screen.getAllDisplays().map((d, i) => ({
+      id: String(d.id),
+      name: d.label || `Display ${i + 1}`,
+      x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height,
+      primary: d.id === primary,
+    }));
+  }
+
+  /** The monitors to span and the centre one, falling back to all / primary. */
+  spanSelection(all = this.displays()) {
+    const s = this.settings;
+    let chosen = all.filter((d) => s.spanMonitors.includes(d.id));
+    if (!chosen.length) chosen = all;
+    const center = chosen.find((d) => d.id === s.spanCenter) ?? chosen.find((d) => d.primary) ?? chosen[0];
+    return { chosen, center };
+  }
+
+  async startSpan(source: PlexusView | null) {
+    const remote = electronRemote();
+    if (!remote) { new Notice('H!V3MYND: spanning monitors needs the desktop app.'); return; }
+    if (this.spanning) this.endSpan();
+    const { chosen, center } = this.spanSelection();
+    if (!center) return;
+    // A virtual screen centred on the centre monitor, wide and tall enough for all of them.
+    const cx = center.x + center.w / 2, cy = center.y + center.h / 2;
+    let hw = center.w / 2, hh = center.h / 2;
+    for (const d of chosen) {
+      hw = Math.max(hw, Math.abs(d.x - cx), Math.abs(d.x + d.w - cx));
+      hh = Math.max(hh, Math.abs(d.y - cy), Math.abs(d.y + d.h - cy));
+    }
+    const slice = (d: SpanDisplay): SpanSlice => ({ fullW: hw * 2, fullH: hh * 2, x: d.x - (cx - hw), y: d.y - (cy - hh), w: d.w, h: d.h, mainH: center.h });
+
+    this.spanning = true;
+    const normal = this.views().filter((v) => !v.spanRole);
+    const src = source?.renderer ?? normal[0]?.renderer ?? null;
+    const flying = src ? src.cinemaOn : true;
+    for (const v of normal) v.closeMenus();
+    // Centre first: the others follow its renderer.
+    const order = [center, ...chosen.filter((d) => d !== center)];
+    let lead: PlexusRenderer | null = null;
+    let leadWin: ElectronWindow | null = null;
+    for (const d of order) {
+      if (!this.spanning) return; // cancelled while opening
+      const leaf = this.app.workspace.openPopoutLeaf({ x: d.x + 40, y: d.y + 40, size: { width: Math.max(320, Math.min(900, d.w - 80)), height: Math.max(240, Math.min(700, d.h - 80)) } });
+      this.spanLeaves.push(leaf);
+      await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { span: true } });
+      const view = leaf.view;
+      if (!(view instanceof PlexusView) || !view.renderer) continue;
+      const isLead = d === center;
+      view.enterSpan(isLead ? 'lead' : 'follow', slice(d), isLead ? null : lead);
+      if (isLead) {
+        lead = view.renderer;
+        lead.setCinema(false);
+        if (src) lead.copyCameraFrom(src);
+        if (flying) lead.setCinema(true);
+      }
+      const bw = await findWindow(remote, view.containerEl.ownerDocument, d);
+      if (bw) {
+        bw.setBounds({ x: d.x, y: d.y, width: d.w, height: d.h });
+        bw.setFullScreen(true);
+        if (isLead) leadWin = bw;
+      }
+    }
+    // Pause the normal views (they're behind the span anyway) and give the centre focus.
+    for (const v of normal) if (v.renderer) v.renderer.paused = true;
+    leadWin?.focus();
+  }
+
+  endSpan() {
+    if (!this.spanning && !this.spanLeaves.length) return;
+    this.spanning = false;
+    this.endingSpan = true;
+    const leaves = this.spanLeaves;
+    this.spanLeaves = [];
+    for (const leaf of leaves) leaf.detach();
+    this.endingSpan = false;
+    for (const v of this.views()) {
+      if (v.renderer) v.renderer.paused = false;
+      v.paintSpanMenu();
+    }
+  }
+
+  /** A span window closed some other way (Alt+F4, Obsidian): end the whole span. */
+  spanViewClosed() {
+    if (this.spanning && !this.endingSpan) this.endSpan();
+  }
+
   onunload() {
+    if (this.cycleTimer !== null) window.clearInterval(this.cycleTimer);
+    if (this.randomTimer !== null) window.clearInterval(this.randomTimer);
+    this.endSpan();
     this.audio.stop();
     if (this.heatTimer !== null) window.clearInterval(this.heatTimer);
     this.stopServer();
@@ -491,7 +1263,7 @@ export default class PlexusPlugin extends Plugin {
   }
 
   async activate() {
-    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE).find((l) => !(l.view instanceof PlexusView && l.view.spanRole));
     const leaf = existing ?? this.app.workspace.getLeaf('tab');
     if (!existing) await leaf.setViewState({ type: VIEW_TYPE, active: true });
     this.app.workspace.revealLeaf(leaf);
@@ -613,7 +1385,7 @@ export default class PlexusPlugin extends Plugin {
           theme: (() => { const r = l.view.containerEl.querySelector('.plexus-log'); if (!r) return null; const cs = getComputedStyle(r); return { cls: r.className, bg: cs.backgroundColor, img: cs.backgroundImage.slice(0, 80), pl: cs.getPropertyValue('--pl-bg') }; })(),
         }));
         const render = this.views().map((v) => ({ stats: v.renderer?.stats() ?? null, audio: !!v.renderer?.audio, error: v.renderer?.lastError ?? null }));
-        res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, views: this.views().length, monitors, sizes, render, audioFrames: this.audio.stats.frames, audioRunning: this.audio.running, ...this.stats }));
+        res.end(JSON.stringify({ ok: true, notes: this.graph?.paths.length ?? 0, views: this.views().length, spanning: this.spanning, displays: this.displays().map((d) => `${d.name} ${d.w}x${d.h}@${d.x},${d.y}${d.primary ? ' main' : ''}`), monitors, sizes, render, audioFrames: this.audio.stats.frames, audioRunning: this.audio.running, ...this.stats }));
         return;
       }
       if (req.method === 'POST' && req.url === '/replay') {
@@ -706,6 +1478,7 @@ export default class PlexusPlugin extends Plugin {
         req.on('end', () => {
           let d: { agent?: string; action?: string; detail?: string } = {};
           try { d = JSON.parse(body); } catch { /* empty */ }
+          void this.toGlasses(`Approval needed: ${d.agent ?? 'an agent'} wants to ${d.action ?? 'act'}${d.detail ? ` (${String(d.detail).slice(0, 80)})` : ''}`);
           void this.askApproval(d).then((approved) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ approved }));
@@ -763,6 +1536,125 @@ export default class PlexusPlugin extends Plugin {
         void this.activateLog(true, tab);
         return;
       }
+      // ---- 1.1.0 extras: tasks (F5), authorship (F12), HUD (F13)
+      if (url.pathname === '/tasks' && req.method === 'GET') { json(res, this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000)); return; }
+      if (url.pathname === '/authorship' && req.method === 'GET') {
+        const path = url.searchParams.get('path') ?? '';
+        void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) }));
+        return;
+      }
+      if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines() }); return; }
+      if (req.method === 'POST' && (url.pathname === '/tasks' || url.pathname === '/tasks/claim' || url.pathname === '/tasks/done' || url.pathname === '/tasks/withdraw')) {
+        void readJson(req).then((body) => {
+          const agent = this.alias(String(body?.agent ?? ''));
+          if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
+          if (url.pathname === '/tasks') {
+            // An agent proposes a task; it waits for the user's approval in the Team tab.
+            const t = this.tasks.add({ title: String(body?.title ?? '').slice(0, 160) || 'Untitled task', detail: maskSecrets(String(body?.detail ?? '').slice(0, 2000)), path: body?.path ? normalizePath(String(body.path)) : undefined, by: agent, status: 'proposed' });
+            new Notice(`H!V3MYND: ${agent} proposed a task: “${t.title}”. Approve it in Brain Monitor → Team.`, 8000);
+            json(res, t);
+            return;
+          }
+          const t = this.tasks.get(String(body?.id ?? ''));
+          if (!t) { res.writeHead(404); res.end('no such task'); return; }
+          if (url.pathname === '/tasks/withdraw') {
+            // An agent takes back a task it proposed (only while it waits for approval).
+            if (t.by !== agent || t.status !== 'proposed') { json(res, { ok: false }); return; }
+            this.tasks.remove(t.id);
+            json(res, { ok: true });
+            return;
+          }
+          if (url.pathname === '/tasks/claim') {
+            if (t.status !== 'open') { json(res, { ok: false, status: t.status, agent: t.agent ?? null }); return; }
+            this.tasks.update(t.id, { status: 'claimed', agent, claimed: Date.now() });
+            if (t.path) this.claims.claim(agent, t.path, t.title, 60, true);
+            json(res, { ok: true, task: this.tasks.get(t.id) });
+            return;
+          }
+          if (t.agent && t.agent !== agent) { json(res, { ok: false, reason: `claimed by ${t.agent}` }); return; }
+          this.tasks.update(t.id, { status: 'done', done: Date.now(), agent, result: maskSecrets(String(body?.result ?? '').slice(0, 2000)) });
+          if (t.path) this.claims.release(agent, [t.path]);
+          new Notice(`H!V3MYND: ${agent} finished “${t.title}”.`, 6000);
+          json(res, { ok: true });
+        }).catch(() => { res.writeHead(400); res.end(); });
+        return;
+      }
+      // ---- teamwork: claims, handoffs, trust, gaps, daily brief
+      if (url.pathname === '/claims' && req.method === 'GET') { json(res, this.claims.list()); return; }
+      if (url.pathname === '/handoffs' && req.method === 'GET') { json(res, this.handoffs.slice(-50).reverse()); return; }
+      if (url.pathname === '/handoff' && req.method === 'GET') {
+        const from = this.alias(url.searchParams.get('from') ?? '');
+        if (!from) { res.writeHead(400); res.end('from= is required'); return; }
+        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+        res.end(this.handoffPackFor(from, url.searchParams.get('to') ?? undefined, url.searchParams.get('task') ?? undefined));
+        return;
+      }
+      if ((url.pathname === '/check' || url.pathname === '/trust') && req.method === 'GET') {
+        const path = url.searchParams.get('path') ?? '';
+        const agent = this.alias(url.searchParams.get('agent') ?? '');
+        const claim = this.claims.holder(path);
+        json(res, { path, claim: claim && claim.agent !== agent ? claim : null, yours: claim?.agent === agent, trust: this.trustOf(path) });
+        return;
+      }
+      if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)); return; }
+      if (req.method === 'POST' && (url.pathname === '/claim' || url.pathname === '/release' || url.pathname === '/brief/now')) {
+        void readJson(req).then(async (body) => {
+          if (url.pathname === '/brief/now') {
+            // Optional "day": YYYY-MM-DD (default today, so far).
+            const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(body?.day ?? ''));
+            const day = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date();
+            json(res, { path: await this.writeBrief(day, body?.timelapse !== false) });
+            return;
+          }
+          const agent = this.alias(String(body?.agent ?? ''));
+          if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
+          const paths: string[] = Array.isArray(body?.paths) ? body.paths.map(String) : body?.path ? [String(body.path)] : [];
+          if (url.pathname === '/release') { json(res, { released: this.claims.release(agent, paths.length ? paths : undefined) }); return; }
+          const minutes = Math.max(1, Math.min(480, Number(body?.minutes) || this.settings.claimMinutes));
+          const claimed: Claim[] = [], conflicts: (Claim & { handoff: string })[] = [];
+          for (const p of paths) {
+            const r = this.claims.claim(agent, normalizePath(p), String(body?.purpose ?? '').slice(0, 200), minutes, true);
+            if ('claim' in r) claimed.push(r.claim);
+            else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
+          }
+          json(res, { ok: !conflicts.length, claimed, conflicts });
+        }).catch(() => { res.writeHead(400); res.end(); });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/snapshot') {
+        // Dev: one rendered frame of a brain view as PNG (view=, node=, dist=, light=0|1).
+        const v = this.views()[Number(url.searchParams.get('view') ?? 0)]?.renderer;
+        if (!v) { res.writeHead(404); res.end(); return; }
+        const num = (k: string) => (url.searchParams.has(k) ? Number(url.searchParams.get(k)) : undefined);
+        const light = url.searchParams.has('light') ? url.searchParams.get('light') === '1' : undefined;
+        const theme = url.searchParams.get('theme');
+        if (theme) v.setBrainTheme(themeById(theme));
+        const shape = url.searchParams.get('shape');
+        if (shape) v.setShape(shape, false);
+        const cl = url.searchParams.get('cluster');
+        if (cl !== null) v.setCluster(Number(cl));
+        const orb = url.searchParams.get('orbit');
+        if (orb) v.setOrbit(orb);
+        const oc = url.searchParams.get('orbitColor');
+        if (oc) v.setOrbitColor(oc);
+        void v.snapshot({ index: num('node'), dist: num('dist'), light, fit: url.searchParams.get('fit') === '1' }).then(async (b) => {
+          if (theme) v.setBrainTheme(themeById(this.settings.brainTheme));
+          if (shape) v.setShape(this.settings.brainShape, false);
+          if (cl !== null) v.setCluster(this.settings.brainCluster);
+          if (orb) v.setOrbit(this.settings.agentOrbit);
+          if (oc) v.setOrbitColor(this.settings.orbitColor);
+          if (!b) { res.writeHead(500); res.end(); return; }
+          res.writeHead(200, { 'Content-Type': 'image/png' });
+          res.end(new Uint8Array(await b.arrayBuffer()));
+        });
+        return;
+      }
+      if (req.method === 'POST' && (req.url === '/span/on' || req.url === '/span/off')) {
+        // Start or stop spanning the brain across the chosen monitors.
+        res.writeHead(202); res.end();
+        if (req.url === '/span/on') void this.startSpan(null); else this.endSpan();
+        return;
+      }
       if (req.method === 'POST' && req.url === '/reload') {
         // Dev convenience: pick up a fresh main.js build without restarting Obsidian.
         res.writeHead(202); res.end();
@@ -793,8 +1685,20 @@ export default class PlexusPlugin extends Plugin {
         try {
           const data = JSON.parse(body);
           if (prewrite) {
-            // Respond only after the snapshot is taken, so the write can't race it.
-            void this.snapshotBefore(data, prewrite[1].toLowerCase()).finally(() => { res.writeHead(204); res.end(); });
+            // Respond only after the snapshot is taken, so the write can't race it. If the
+            // note is claimed by another agent, or the agent is relying on a note with low
+            // trust, the reply tells it so (Claude Code's PreToolUse format: the reason is
+            // shown to the agent and the edit is held back).
+            const raw = prewrite[1].toLowerCase();
+            void this.snapshotBefore(data, raw)
+              .then((paths) => this.preWriteReply(this.alias(raw), paths, data))
+              .catch(() => null)
+              .then((reason) => {
+                if (reason && this.hookReplyAgents().has(raw)) {
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
+                } else { res.writeHead(204); res.end(); }
+              });
             return;
           }
           if (bridgeMsg) {
@@ -805,7 +1709,7 @@ export default class PlexusPlugin extends Plugin {
             const p = promptFromHook(data);
             const agent = prompt[1].toLowerCase();
             if (p && this.settings.storePurposes) {
-              const entry = { text: p.purpose, at: Date.now() };
+              const entry = { text: maskSecrets(p.purpose), at: Date.now() };
               this.purposes.set(`${agent}:${p.session}`, entry);
               this.purposes.set(`${agent}:*`, entry);
               this.savePurposes();
@@ -914,6 +1818,8 @@ export default class PlexusPlugin extends Plugin {
       if (action === 'read') entry.tokens = this.readTokens(ev, note, notes.length, entry);
       this.log.add(entry);
       if (action === 'write') this.checkCollision(entry);
+      if (action === 'write' && this.settings.claimMode !== 'off') this.claims.claim(agent, note, purpose, this.settings.claimMinutes, false);
+      if (this.settings.handoffs) this.checkHandoff(entry);
       this.checkWatch(agent, action, note);
     }
   }
@@ -1170,17 +2076,20 @@ export default class PlexusPlugin extends Plugin {
     return [...out];
   }
 
-  private async snapshotBefore(data: any, agent: string) {
+  private async snapshotBefore(data: any, agent: string): Promise<string[]> {
+    const all = new Set<string>();
     for (const ev of hookToEvents(data, agent)) {
       if (ev.kind !== 'write') continue;
       const texts = (ev.texts as string[]) ?? [];
       const graph = this.getGraph();
       const paths = new Set([...graph.resolver.resolve(texts).map((i) => graph.paths[i]), ...this.writePaths(texts)]);
       for (const p of paths) {
+        all.add(p);
         const exists = await this.app.vault.adapter.exists(p);
         this.pendingBefore.set(p, { text: exists ? await this.app.vault.adapter.read(p) : null, t: Date.now() });
       }
     }
+    return [...all];
   }
 
   private async captureChange(ev: PulseEvent, agent: string, path: string) {
@@ -1195,6 +2104,7 @@ export default class PlexusPlugin extends Plugin {
     const exists = await this.app.vault.adapter.exists(path);
     const after = exists ? await this.app.vault.adapter.read(path) : null;
     if (before === after) return;
+    const masked = after !== null && this.settings.autoMaskSecrets && this.settings.secretScan !== 'off' ? newSecrets(before, after) : [];
     await this.changes.add({
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       t: Date.now(),
@@ -1205,6 +2115,25 @@ export default class PlexusPlugin extends Plugin {
       before,
       after,
     });
+    if (masked.length && after !== null) await this.maskNote(path, after, masked.map((h) => h.kind), agent);
+  }
+
+  /** F4: mask the keys and tokens an agent just wrote into a note (undoable in Changes). */
+  private async maskNote(path: string, text: string, kinds: string[], agent: string) {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!(f instanceof TFile)) return;
+    const clean = maskSecrets(text);
+    if (clean === text) return;
+    await this.app.vault.modify(f, clean);
+    await this.changes.add({
+      id: `${Date.now().toString(36)}-mask`, t: Date.now(), agent: 'H!V3MYND', path,
+      purpose: `Masked ${kinds.length} secret${kinds.length === 1 ? '' : 's'} ${agent} wrote (${[...new Set(kinds)].join(', ')})`,
+      source: 'H!V3MYND secret scanner', before: text, after: clean,
+    });
+    new Notice(`H!V3MYND masked ${kinds.length === 1 ? 'a' : kinds.length} ${[...new Set(kinds)].join(', ')} that ${agent} wrote into “${noteTitle(path)}”. Undo it in Brain Monitor → Changes if it was meant to be there.`, 12_000);
+    const col: Collision = { t: Date.now(), kind: 'watch', note: path, writer: agent, other: 'secret scanner', otherAt: Date.now(), action: 'write', rule: 'secret' };
+    this.alerts.push(col);
+    for (const fn of this.alertListeners) fn(col);
   }
 
   private confirmRestore(c: ChangeRecord) {
@@ -1264,7 +2193,7 @@ export default class PlexusPlugin extends Plugin {
       id: raw.id,
       sender: String(raw.sender ?? 'other'),
       recipient: String(raw.recipient ?? 'all'),
-      body: String(raw.body ?? raw.text ?? ''),
+      body: maskSecrets(String(raw.body ?? raw.text ?? '')),
       reply_to: raw.reply_to ?? null,
       t,
       important: !!raw.important,
@@ -1281,7 +2210,15 @@ export default class PlexusPlugin extends Plugin {
 
   // ------------------------------------------------------------ music reactivity
 
+  /** Music button / M: with music on and its panel closed, bring the panel back; otherwise toggle. */
+  async musicButton() {
+    const hidden = this.views().filter((v) => v.renderer?.meterHidden);
+    if (this.audio.running && hidden.length) { for (const v of hidden) v.renderer!.showMeter(); return; }
+    await this.toggleMusic();
+  }
+
   async toggleMusic() {
+    for (const v of this.views()) v.renderer?.showMeter();
     if (this.audio.running) {
       this.audio.stop();
       for (const v of this.views()) if (v.renderer) v.renderer.audio = null;
@@ -1300,7 +2237,7 @@ export default class PlexusPlugin extends Plugin {
     for (const v of this.views()) {
       if (!v.renderer) continue;
       const s = this.settings;
-      v.renderer.audio = this.audio.running ? { reactor: this.audio, strength: s.musicStrength, delayMs: s.musicDelay, midHigh: s.musicMidHigh, palette: MUSIC_PALETTES[s.musicPalette] ?? MUSIC_PALETTES.Neon, gains: { bass: s.musicBassGain, mid: s.musicMidGain, high: s.musicHighGain } } : null;
+      v.renderer.audio = this.audio.running ? { reactor: this.audio, strength: s.musicStrength, delayMs: s.musicDelay, midHigh: s.musicMidHigh, palette: musicColors(s.musicColor, MUSIC_PALETTES[s.musicPalette] ?? MUSIC_PALETTES.Neon), gains: { bass: s.musicBassGain, mid: s.musicMidGain, high: s.musicHighGain } } : null;
       v.renderer.audioControls = this.audioControls;
     }
   }
@@ -1309,6 +2246,9 @@ export default class PlexusPlugin extends Plugin {
 
   /** Wiring for the music panel in the brain: band sliders and the source picker. */
   readonly audioControls: AudioControls = {
+    colorOptions: () => ORBIT_COLORS.map(([id, label]) => [id, id === 'default' ? 'Default (multicolour)' : label] as [string, string]),
+    color: () => this.settings.musicColor,
+    setColor: (id) => { this.settings.musicColor = id; void this.saveData(this.settings); this.applyMusic(); },
     setGain: (band, v) => {
       const key = band === 'bass' ? 'musicBassGain' : band === 'mid' ? 'musicMidGain' : 'musicHighGain';
       this.settings[key] = Math.max(0, Math.min(2, v));
@@ -1464,6 +2404,9 @@ export default class PlexusPlugin extends Plugin {
       if (v) (this.settings as any)[k] = v;
     }
     if (legacy) await this.saveData(this.settings); // moves them into SecretStorage
+    // Themes replaced the light/dark switches: light = Inkblot, dark = Multiverse.
+    if (!this.settings.brainTheme) this.settings.brainTheme = this.settings.brainLight ? 'inkblot' : 'multiverse';
+    if (!this.settings.monitorTheme) this.settings.monitorTheme = this.settings.monitorLight ? 'inkblot' : 'multiverse';
     if (!this.settings.listenerKey) await this.regenerateKey();
     else this.writeKeyFile();
     if (!this.settings.viewerKey) { this.settings.viewerKey = randomHex(24); await this.saveData(this.settings); }
@@ -1584,18 +2527,36 @@ class PlexusView extends ItemView {
     this.button(bar, 'history', 'Replay agent activity (R)', () => this.toggleReplayBar());
     this.button(bar, 'sprout', 'Vault growth time-lapse (G)', () => this.toggleGrowth());
     this.button(bar, 'shapes', 'Meaning map: arrange by topic instead of links (S)', () => void this.plugin.toggleMeaning());
-    this.button(bar, 'music', 'Music reactivity (M)', () => void this.plugin.toggleMusic());
+    this.button(bar, 'music', 'Music reactivity (M)', () => void this.plugin.musicButton());
     this.button(bar, 'search', 'Search the brain (/ or Ctrl+F)', () => this.search?.show());
-    const theme = this.button(bar, this.plugin.settings.brainLight ? 'moon' : 'sun', 'Light / dark theme', () => {
-      this.plugin.settings.brainLight = !this.plugin.settings.brainLight;
-      void this.plugin.saveData(this.plugin.settings);
-      setIcon(theme, this.plugin.settings.brainLight ? 'moon' : 'sun');
-      this.applyTheme();
+    this.cinemaBtn = this.button(bar, 'clapperboard', 'Cinematic camera (C starts / stops)', () => this.toggleCinemaMenu());
+    this.spanBtn = this.button(bar, 'monitor', 'Span across monitors', () => this.toggleSpanMenu());
+    this.button(bar, 'scan-eye', 'Focus on a project folder (Esc leaves)', () => this.plugin.pickProject());
+    // Theme drop-down. One theme for every brain view: the normal view and each span monitor.
+    this.themeBtn = this.button(bar, 'palette', 'Theme', () => {
+      const menu = new Menu();
+      const s = this.plugin.settings;
+      addGroup(menu, 'Randomize', 'shuffle', [
+        { title: 'On', checked: s.randomizeOn, run: () => void this.plugin.setRandomize(true) },
+        { title: 'Off', checked: !s.randomizeOn, run: () => void this.plugin.setRandomize(false) },
+        ...CYCLES.filter(([sec]) => sec > 0).map(([sec, label]) => ({ title: `Every ${label}`, checked: sec === s.randomizeInterval, run: () => void this.plugin.setRandomizeInterval(sec) })),
+        { title: 'Shuffle now', checked: false, run: () => void this.plugin.shuffleLook() },
+      ]);
+      addGroup(menu, 'Colors', 'palette', THEMES.map((t) => ({ title: t.name, checked: t.id === s.brainTheme, run: () => void this.plugin.setBrainTheme(t.id) })));
+      addGroup(menu, 'Shapes', 'shapes', SHAPES.map((sh) => ({ title: sh.name, checked: sh.id === s.brainShape, run: () => void this.plugin.setBrainShape(sh.id) })));
+      addGroup(menu, 'Agent orbit', 'orbit', ORBITS.map(([id, label]) => ({ title: label, checked: id === s.agentOrbit, run: () => void this.plugin.setAgentOrbit(id) })));
+      addGroup(menu, 'Orbit line color', 'circle-dot', ORBIT_COLORS.map(([id, label]) => ({ title: label, checked: id === s.orbitColor, run: () => void this.plugin.setOrbitColor(id) })));
+      addGroup(menu, 'Shape cycle', 'repeat', CYCLES.map(([sec, label]) => ({ title: label, checked: sec === s.shapeCycle, run: () => void this.plugin.setShapeCycle(sec) })));
+      menu.addItem((item) => item.setTitle('Clustering…').setIcon('sliders-horizontal').onClick(() => this.toggleClusterPanel()));
+      const r = this.themeBtn!.getBoundingClientRect();
+      showMenu(menu, { x: r.left, y: r.bottom + 4 }, this.containerEl.ownerDocument);
     });
     this.button(bar, 'activity', 'Brain Monitor (own window)', () => void this.plugin.activateLog(true));
 
     try {
+      this.plugin.trace('view: creating renderer');
       this.renderer = new PlexusRenderer(host, this.plugin.settings);
+      this.plugin.trace('view: renderer created');
     } catch (err) {
       el.createDiv({ cls: 'plexus-error', text: `H!V3MYND needs WebGL 2: ${err}` });
       return;
@@ -1606,7 +2567,13 @@ class PlexusView extends ItemView {
       if (document.fullscreenElement) void document.exitFullscreen();
       void this.app.workspace.openLinkText(path, '', split ? 'split' : 'tab');
     };
+    this.plugin.trace('view: applying theme');
     this.applyTheme();
+    this.plugin.trace('view: theme applied');
+    this.renderer.onCinemaChange = (on) => { this.cinemaBtn?.toggleClass('is-on', on); this.cinemaMenuPaint?.(); };
+    this.applyCinema();
+    this.renderer.setLowLatency(this.plugin.settings.lowLatency);
+    if (this.plugin.settings.cinemaOnOpen) this.renderer.setCinema(true);
     this.renderer.onSettled = (cache) => void this.plugin.saveLayout(cache, this.layoutMode);
     this.search = new BrainSearch(el, this.app, {
       paths: () => this.plugin.getGraph().paths,
@@ -1623,7 +2590,7 @@ class PlexusView extends ItemView {
       let inn = 0;
       for (const targets of Object.values(links)) if (targets[path]) inn++;
       return { out: Object.keys(links[path] ?? {}).length, in: inn };
-    }, (a) => this.plugin.settings.agents.find((x) => x.name === a)?.color ?? '#ffffff');
+    }, (a) => this.plugin.settings.agents.find((x) => x.name === a)?.color ?? '#ffffff', (path) => this.plugin.noteBadge(path));
     this.renderer.onHover = (i, x, y) => this.card?.update(i >= 0 ? this.plugin.getGraph().paths[i] ?? null : null, i, x, y);
     this.renderer.setAgents(this.plugin.settings.agents);
     this.replay = new ReplayBar(el, {
@@ -1640,13 +2607,15 @@ class PlexusView extends ItemView {
       if (this.replay?.handleKey(e)) return;
       if (this.growth?.handleKey(e)) return;
       if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); void this.plugin.toggleMeaning(); return; }
+      if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleCinema(); return; }
+      if (e.key === 'Escape' && this.plugin.projectFocus && !this.search?.open) { e.preventDefault(); this.plugin.focusProject(null); return; }
       if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleGrowth(); return; }
       if ((e.key === '/' || ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey))) && !e.altKey) { e.preventDefault(); this.search?.show(); return; }
       if (e.key === 'Escape' && this.search?.open) { e.preventDefault(); this.search.close(); return; }
       if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleReplayBar(); }
       if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleFullscreen(); }
       if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); void this.plugin.toggleHeat(); }
-      if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); void this.plugin.toggleMusic(); }
+      if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); void this.plugin.musicButton(); }
     });
     this.registerDomEvent(document, 'fullscreenchange', () => {
       if (this.fsButton) setIcon(this.fsButton, document.fullscreenElement === el ? 'minimize' : 'maximize');
@@ -1687,6 +2656,7 @@ class PlexusView extends ItemView {
     if (!this.renderer || this.plugin.getGraph() !== g) return; // closed or superseded meanwhile
     this.layoutMode = input.layoutKey ?? 'links';
     this.renderer.setGraph(input, await this.plugin.loadLayout(this.layoutMode));
+    this.plugin.refreshMarkers();
     if (this.plugin.heatOn) await this.plugin.applyHeat();
     this.plugin.applyMusic();
   }
@@ -1695,10 +2665,447 @@ class PlexusView extends ItemView {
     return this.replay?.toggleOpen();
   }
 
+  /**
+   * Replay these entries squeezed into `seconds` and record the brain doing it
+   * (WebM). The camera flies through while recording. Null if recording isn't possible.
+   */
+  async recordTimelapse(entries: AccessEntry[], seconds: number): Promise<ArrayBuffer | null> {
+    const r = this.renderer;
+    if (!r || !entries.length || typeof MediaRecorder === 'undefined') return null;
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+    if (!mime) return null;
+    const stream = r.canvasEl.captureStream(30);
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000 });
+    const chunks: Blob[] = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve(); });
+    const index = new Map<string, number>();
+    this.plugin.getGraph().paths.forEach((p, i) => index.set(p, i));
+    const start = entries[0].t, span = Math.max(1, entries[entries.length - 1].t - start);
+    const flying = r.cinemaOn;
+    if (!flying) r.setCinema(true);
+    this.plugin.replaying = true;
+    rec.start(1000);
+    const t0 = performance.now();
+    let k = 0;
+    await new Promise<void>((resolve) => {
+      const step = () => {
+        const done = (performance.now() - t0) / (seconds * 1000);
+        const upTo = start + done * span;
+        while (k < entries.length && entries[k].t <= upTo) {
+          const e = entries[k++];
+          const idx = e.notes.map((p) => index.get(p) ?? -1).filter((i) => i >= 0);
+          if (idx.length) r.touch(idx, e.agent, e.action === 'write' ? 'write' : e.action === 'search' ? 'scan' : 'read');
+        }
+        if (done >= 1) resolve();
+        else window.setTimeout(step, 40);
+      };
+      step();
+    });
+    rec.stop();
+    await stopped;
+    this.plugin.replaying = false;
+    if (!flying) r.setCinema(false);
+    for (const t of stream.getTracks()) t.stop();
+    if (!chunks.length) return null;
+    return await new Blob(chunks, { type: 'video/webm' }).arrayBuffer();
+  }
+
+  private cinemaBtn: HTMLButtonElement | null = null;
+
+  toggleCinema() {
+    if (this.renderer) this.renderer.setCinema(!this.renderer.cinemaOn, true);
+  }
+
+  // ---------------------------------------------------------------- span across monitors
+
+  /** Set while this view is one of the span windows: 'lead' is the centre monitor. */
+  spanRole: 'lead' | 'follow' | null = null;
+  private spanBtn: HTMLButtonElement | null = null;
+  private spanMenu: HTMLElement | null = null;
+  private spanMenuPaint: (() => void) | null = null;
+  private spanMenuOff: (() => void) | null = null;
+
+  getState() {
+    return { ...super.getState(), span: this.spanRole !== null };
+  }
+
+  async setState(state: unknown, result: ViewStateResult) {
+    // A span window restored by Obsidian after a restart: the span is over, close it.
+    if (state && typeof state === 'object' && (state as { span?: boolean }).span && !this.plugin.spanning) {
+      window.setTimeout(() => this.leaf.detach(), 0);
+    }
+    await super.setState(state, result);
+  }
+
+  /** Become one monitor's part of the span. Followers copy the leader every frame. */
+  enterSpan(role: 'lead' | 'follow', slice: SpanSlice, leader: PlexusRenderer | null) {
+    this.spanRole = role;
+    const doc = this.containerEl.ownerDocument;
+    doc.body.addClass('plexus-span-window');
+    this.contentEl.addClass(role === 'lead' ? 'is-span-lead' : 'is-span-follow');
+    this.renderer?.setSlice(slice);
+    this.renderer?.setLeader(leader);
+    this.applyTheme();
+    // Clicking a note ends the span and opens it in the main window.
+    if (this.renderer) {
+      this.renderer.onOpen = (i) => {
+        const path = this.plugin.getGraph().paths[i];
+        this.plugin.endSpan();
+        if (path) window.setTimeout(() => void this.plugin.app.workspace.openLinkText(path, '', 'tab'), 50);
+      };
+    }
+    // Escape on any span monitor ends the span (unless it is closing a menu or search).
+    this.registerDomEvent(doc, 'keydown', (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || this.cinemaMenu || this.spanMenu || this.search?.open) return;
+      e.preventDefault();
+      this.plugin.endSpan();
+    });
+  }
+
+  private clusterPanel: HTMLElement | null = null;
+  private clusterOff: (() => void) | null = null;
+
+  /** A small slider panel under the palette button: spread .. as laid out .. tight. */
+  toggleClusterPanel() {
+    if (this.clusterPanel) { this.closeClusterPanel(); return; }
+    this.closeMenus();
+    const btn = this.themeBtn;
+    const s = this.plugin.settings;
+    const m = (this.clusterPanel = this.contentEl.createDiv({ cls: 'plexus-cine-menu plexus-cluster-menu' }));
+    if (btn) m.setCssStyles({ right: `${Math.max(8, Math.round(this.contentEl.getBoundingClientRect().right - btn.getBoundingClientRect().right))}px` });
+    for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'dblclick', 'click']) m.addEventListener(ev, (e) => e.stopPropagation());
+    const head = m.createDiv({ cls: 'pcm-head' });
+    head.createSpan({ cls: 'pcm-title', text: 'Clustering' });
+    const x = head.createEl('button', { cls: 'pcm-x', attr: { 'aria-label': 'Close' } });
+    setIcon(x, 'x');
+    x.addEventListener('click', () => this.closeClusterPanel());
+    const row = m.createDiv({ cls: 'pcm-row' });
+    row.createSpan({ cls: 'pcm-name', text: 'Spread' });
+    const slider = row.createEl('input', { cls: 'pcm-speed', attr: { type: 'range', min: '-100', max: '100', step: '5', 'aria-label': 'Clustering' } });
+    slider.value = String(Math.round(s.brainCluster * 100));
+    row.createSpan({ cls: 'pcm-val', text: 'Tight' });
+    const hint = m.createDiv({ cls: 'pcm-hint' });
+    const paint = () => hint.setText(s.brainCluster === 0 ? 'As laid out. Double-click the slider to reset.' : s.brainCluster > 0 ? `Tighter clusters (${Math.round(s.brainCluster * 100)}%)` : `More spread out (${Math.round(-s.brainCluster * 100)}%)`);
+    paint();
+    let saveTimer = 0;
+    slider.addEventListener('input', () => {
+      s.brainCluster = Number(slider.value) / 100;
+      for (const v of this.plugin.views()) v.renderer?.setCluster(s.brainCluster);
+      paint();
+      window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => void this.plugin.saveData(s), 400);
+    });
+    slider.addEventListener('dblclick', () => { slider.value = '0'; slider.dispatchEvent(new Event('input')); });
+    const doc = m.ownerDocument;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); this.closeClusterPanel(); } };
+    doc.addEventListener('keydown', onKey, true);
+    this.clusterOff = () => doc.removeEventListener('keydown', onKey, true);
+  }
+
+  closeClusterPanel() {
+    this.clusterOff?.();
+    this.clusterOff = null;
+    this.clusterPanel?.remove();
+    this.clusterPanel = null;
+  }
+
+  closeMenus() {
+    this.closeClusterPanel();
+    this.closeCinemaMenu();
+    this.closeSpanMenu();
+  }
+
+  paintSpanMenu() {
+    this.spanMenuPaint?.();
+  }
+
+  /** Drop-down: which monitors take part, which is the centre, and start / stop. */
+  toggleSpanMenu() {
+    if (this.spanMenu) { this.closeSpanMenu(); return; }
+    this.closeCinemaMenu();
+    const btn = this.spanBtn;
+    if (!btn) return;
+    const plugin = this.plugin;
+    const s = plugin.settings;
+    const all = plugin.displays();
+    const m = (this.spanMenu = this.contentEl.createDiv({ cls: 'plexus-cine-menu plexus-span-menu' }));
+    const right = this.contentEl.getBoundingClientRect().right - btn.getBoundingClientRect().right;
+    m.setCssStyles({ right: `${Math.max(8, Math.round(right))}px` });
+    for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'dblclick', 'click']) m.addEventListener(ev, (e) => e.stopPropagation());
+
+    const head = m.createDiv({ cls: 'pcm-head' });
+    head.createSpan({ cls: 'pcm-title', text: 'Span monitors' });
+    const x = head.createEl('button', { cls: 'pcm-x', attr: { 'aria-label': 'Close' } });
+    setIcon(x, 'x');
+    x.addEventListener('click', () => this.closeSpanMenu());
+
+    if (!all.length) {
+      m.createDiv({ cls: 'pcm-hint', text: 'Monitor info is only available in the desktop app.' });
+    }
+
+    // Mini map of the monitors as Windows arranges them. Click one to include / leave out.
+    const map = m.createDiv({ cls: 'psm-map' });
+    const minX = Math.min(...all.map((d) => d.x)), minY = Math.min(...all.map((d) => d.y));
+    const maxX = Math.max(...all.map((d) => d.x + d.w)), maxY = Math.max(...all.map((d) => d.y + d.h));
+    const scale = Math.min(212 / Math.max(1, maxX - minX), 104 / Math.max(1, maxY - minY));
+    map.setCssStyles({ height: `${Math.round((maxY - minY) * scale) + 2}px` });
+    const tiles = all.map((d, i) => {
+      const t = map.createDiv({ cls: 'psm-mon', text: String(i + 1), attr: { title: `${d.name} · ${d.w}×${d.h}` } });
+      t.setCssStyles({
+        left: `${Math.round((d.x - minX) * scale)}px`, top: `${Math.round((d.y - minY) * scale)}px`,
+        width: `${Math.max(8, Math.round(d.w * scale) - 3)}px`, height: `${Math.max(8, Math.round(d.h * scale) - 3)}px`,
+      });
+      t.addEventListener('click', () => toggle(d.id));
+      return t;
+    });
+
+    // List: include checkbox, name, size, centre choice.
+    const list = m.createDiv({ cls: 'psm-list' });
+    const rows = all.map((d, i) => {
+      const row = list.createDiv({ cls: 'psm-row' });
+      const cb = row.createEl('input', { attr: { type: 'checkbox', 'aria-label': `Include ${d.name}` } });
+      cb.addEventListener('change', () => toggle(d.id));
+      const name = row.createSpan({ cls: 'psm-name' });
+      name.createSpan({ cls: 'psm-num', text: String(i + 1) });
+      name.createSpan({ text: ` ${d.w}×${d.h}${d.primary ? ' · main' : ''}` });
+      const c = row.createEl('button', { cls: 'pcm-chip psm-center', text: 'Center' });
+      c.addEventListener('click', () => {
+        s.spanCenter = d.id;
+        if (!effective().includes(d.id)) s.spanMonitors = [...effective(), d.id];
+        changed();
+      });
+      return { cb, c };
+    });
+
+    const go = m.createEl('button', { cls: 'pcm-go' });
+    go.addEventListener('click', () => {
+      if (plugin.spanning) plugin.endSpan();
+      else { this.closeSpanMenu(); void plugin.startSpan(this); }
+      paint();
+    });
+    const hint = m.createDiv({ cls: 'pcm-hint' });
+
+    // Empty selection means "all monitors"; work on the explicit list from here on.
+    const effective = () => (s.spanMonitors.filter((id) => all.some((d) => d.id === id)).length ? s.spanMonitors.filter((id) => all.some((d) => d.id === id)) : all.map((d) => d.id));
+    const toggle = (id: string) => {
+      const cur = effective();
+      const next = cur.includes(id) ? cur.filter((v) => v !== id) : [...cur, id];
+      if (!next.length) return; // keep at least one
+      s.spanMonitors = next;
+      changed();
+    };
+    const changed = () => {
+      void plugin.saveData(s);
+      paint();
+      // Already spanning: apply the new selection straight away.
+      if (plugin.spanning) void plugin.startSpan(this.spanRole ? null : this);
+    };
+    const paint = () => {
+      const on = effective();
+      const { center } = plugin.spanSelection(all);
+      all.forEach((d, i) => {
+        const inc = on.includes(d.id), isC = center?.id === d.id;
+        tiles[i].toggleClass('is-on', inc);
+        tiles[i].toggleClass('is-center', isC);
+        rows[i].cb.checked = inc;
+        rows[i].c.toggleClass('is-on', isC);
+      });
+      go.setText(plugin.spanning ? '■  Stop spanning' : `▶  Span across ${on.length} monitor${on.length === 1 ? '' : 's'}`);
+      go.toggleClass('is-on', plugin.spanning);
+      hint.setText(plugin.spanning
+        ? 'Esc on any monitor stops. The toolbar sits at the bottom of the center monitor.'
+        : 'Click a monitor to include or leave it out. The center monitor leads the camera.');
+    };
+    this.spanMenuPaint = paint;
+    paint();
+
+    const doc = m.ownerDocument;
+    let swallowClick = false;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (m.contains(t) || btn.contains(t)) return;
+      if (this.contentEl.contains(t)) { e.stopPropagation(); e.preventDefault(); swallowClick = true; }
+      this.closeSpanMenu();
+    };
+    const onClick = (e: MouseEvent) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      this.closeSpanMenu();
+    };
+    doc.addEventListener('pointerdown', onDown, true);
+    doc.addEventListener('keydown', onKey, true);
+    doc.addEventListener('click', onClick, true);
+    this.spanMenuOff = () => {
+      doc.removeEventListener('pointerdown', onDown, true);
+      doc.removeEventListener('keydown', onKey, true);
+      window.setTimeout(() => doc.removeEventListener('click', onClick, true), 0);
+    };
+    btn.addClass('is-open');
+  }
+
+  closeSpanMenu() {
+    this.spanMenuOff?.();
+    this.spanMenuOff = null;
+    this.spanMenuPaint = null;
+    this.spanMenu?.remove();
+    this.spanMenu = null;
+    this.spanBtn?.removeClass('is-open');
+  }
+
+  private cinemaMenu: HTMLElement | null = null;
+  private cinemaMenuPaint: (() => void) | null = null;
+  private cinemaMenuOff: (() => void) | null = null;
+
+  /** Drop-down under the clapperboard: start/stop, auto-start delay (or off), start on open, speed. */
+  toggleCinemaMenu() {
+    if (this.cinemaMenu) { this.closeCinemaMenu(); return; }
+    this.closeSpanMenu();
+    const btn = this.cinemaBtn;
+    if (!btn) return;
+    const s = this.plugin.settings;
+    const save = () => void this.plugin.saveData(s);
+    const all = () => this.plugin.views();
+    const m = (this.cinemaMenu = this.contentEl.createDiv({ cls: 'plexus-cine-menu' }));
+    // Sit under the button, right-aligned to it.
+    const right = this.contentEl.getBoundingClientRect().right - btn.getBoundingClientRect().right;
+    m.setCssStyles({ right: `${Math.max(8, Math.round(right))}px` });
+    // Keep clicks, drags, wheel and keys inside the menu (not orbiting the brain or
+    // triggering the view's single-key shortcuts).
+    for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'dblclick', 'click']) m.addEventListener(ev, (e) => e.stopPropagation());
+
+    const head = m.createDiv({ cls: 'pcm-head' });
+    head.createSpan({ cls: 'pcm-title', text: 'Cinematic camera' });
+    const x = head.createEl('button', { cls: 'pcm-x', attr: { 'aria-label': 'Close' } });
+    setIcon(x, 'x');
+    x.addEventListener('click', () => this.closeCinemaMenu());
+    const go = m.createEl('button', { cls: 'pcm-go' });
+
+    m.createDiv({ cls: 'pcm-label', text: 'Start by itself after' });
+    const chips = m.createDiv({ cls: 'pcm-chips' });
+    const fmt = (sec: number) => (sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : `${sec} s`);
+    const options = [0, 30, 60, 120, 300, 600];
+    for (const sec of options) {
+      const c = chips.createEl('button', { cls: 'pcm-chip', text: sec ? fmt(sec) : 'Off', attr: { 'data-sec': String(sec) } });
+      c.addEventListener('click', () => {
+        s.cinemaIdle = sec;
+        save();
+        for (const v of all()) { v.applyCinema(); if (sec > 0) v.renderer?.releaseCinemaHold(); }
+        paint();
+      });
+    }
+    const hint = m.createDiv({ cls: 'pcm-hint' });
+
+    const openRow = m.createEl('label', { cls: 'pcm-row pcm-check' });
+    const cb = openRow.createEl('input', { attr: { type: 'checkbox' } });
+    cb.checked = s.cinemaOnOpen;
+    openRow.createSpan({ text: 'Start when the brain opens' });
+    cb.addEventListener('change', () => { s.cinemaOnOpen = cb.checked; save(); });
+
+    const speedRow = m.createDiv({ cls: 'pcm-row' });
+    speedRow.createSpan({ cls: 'pcm-name', text: 'Speed' });
+    const speed = speedRow.createEl('input', { cls: 'pcm-speed', attr: { type: 'range', min: '0.3', max: '2', step: '0.1', 'aria-label': 'Flight speed' } });
+    speed.value = String(s.cinemaSpeed);
+    const speedVal = speedRow.createSpan({ cls: 'pcm-val' });
+    speed.addEventListener('input', () => {
+      s.cinemaSpeed = Number(speed.value);
+      speedVal.setText(`${s.cinemaSpeed.toFixed(1)}×`);
+      for (const v of all()) v.applyCinema();
+    });
+    speed.addEventListener('change', save);
+
+    const paint = () => {
+      const on = !!this.renderer?.cinemaOn;
+      go.setText(on ? '■  Stop flythrough' : '▶  Start flythrough');
+      go.toggleClass('is-on', on);
+      chips.querySelectorAll<HTMLElement>('.pcm-chip').forEach((c) => c.toggleClass('is-on', Number(c.dataset.sec) === s.cinemaIdle));
+      hint.setText(s.cinemaIdle > 0
+        ? `Starts after ${fmt(s.cinemaIdle)} without touching the brain. Stopping it with the button above keeps it off.`
+        : 'Off: it only runs when you start it.');
+      speedVal.setText(`${s.cinemaSpeed.toFixed(1)}×`);
+    };
+    go.addEventListener('click', () => { this.toggleCinema(); paint(); });
+    this.cinemaMenuPaint = paint;
+    paint();
+
+    // Close on a click anywhere else, or Escape. A click on the brain only closes the
+    // menu: it doesn't reach the canvas, so it doesn't count as touching the brain
+    // (which would stop the flythrough).
+    const doc = m.ownerDocument;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (m.contains(t) || btn.contains(t)) return;
+      if (this.contentEl.contains(t)) {
+        e.stopPropagation();
+        e.preventDefault();
+        swallowClick = true;
+      }
+      this.closeCinemaMenu();
+    };
+    // The click that follows a swallowed pointerdown is dropped too (no node pick).
+    let swallowClick = false;
+    const onClick = (e: MouseEvent) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      this.closeCinemaMenu();
+    };
+    doc.addEventListener('pointerdown', onDown, true);
+    doc.addEventListener('keydown', onKey, true);
+    this.cinemaMenuOff = () => {
+      doc.removeEventListener('pointerdown', onDown, true);
+      doc.removeEventListener('keydown', onKey, true);
+      // Keep the click-swallower one tick longer: the click lands after the menu closes.
+      window.setTimeout(() => doc.removeEventListener('click', onClick, true), 0);
+    };
+    doc.addEventListener('click', onClick, true);
+    btn.addClass('is-open');
+  }
+
+  closeCinemaMenu() {
+    this.cinemaMenuOff?.();
+    this.cinemaMenuOff = null;
+    this.cinemaMenuPaint = null;
+    this.cinemaMenu?.remove();
+    this.cinemaMenu = null;
+    this.cinemaBtn?.removeClass('is-open');
+  }
+
+  applyCinema() {
+    if (!this.renderer) return;
+    const s = this.plugin.settings;
+    this.renderer.cinemaIdleSec = s.cinemaIdle;
+    this.renderer.cinemaSpeed = s.cinemaSpeed;
+  }
+
+  private themeBtn: HTMLButtonElement | null = null;
+
   applyTheme() {
-    const light = this.plugin.settings.brainLight;
+    const theme = themeById(this.plugin.settings.brainTheme);
+    const light = theme.light;
     this.contentEl.toggleClass('is-light', light);
-    this.renderer?.setTheme(light);
+    this.contentEl.ownerDocument.body.toggleClass('plexus-span-light', light && this.spanRole !== null);
+    // Buttons and menus pick up the theme's node colour.
+    const accent = chromeAccent(theme);
+    if (accent) this.contentEl.style.setProperty('--hv-accent', accent);
+    else this.contentEl.style.removeProperty('--hv-accent');
+    this.contentEl.dataset.theme = theme.id;
+    this.renderer?.setBrainTheme(theme);
+    this.renderer?.setShape(shapeById(this.plugin.settings.brainShape).id, false);
+    this.renderer?.setCluster(this.plugin.settings.brainCluster);
+    this.renderer?.setOrbitColor(this.plugin.settings.orbitColor);
+    this.renderer?.setOrbit(this.plugin.settings.agentOrbit);
   }
 
   // Replay and the growth time-lapse share the bottom bar; one at a time.
@@ -1718,6 +3125,11 @@ class PlexusView extends ItemView {
   }
 
   async onClose() {
+    this.closeMenus();
+    if (this.spanRole) {
+      this.spanRole = null;
+      this.plugin.spanViewClosed();
+    }
     if (this.replay?.open) this.replay.close();
     if (this.growth?.open) this.growth.close();
     if (document.fullscreenElement === this.contentEl) await document.exitFullscreen();
@@ -1794,6 +3206,55 @@ class PlexusSettingTab extends PluginSettingTab {
     toggle('Daily brain report', "Summarise each day's agent activity in one note (Reports subfolder of the digest folder): who did what, most-used notes, alerts, re-reads and searches that found nothing. Written the next day, or any time with the command.", 'dailyReport', () => this.plugin.refreshGraph(true));
     new Setting(containerEl).setName('Digest folder').addText((t) =>
       t.setValue(s.digestFolder).onChange(debounce((v: string) => { s.digestFolder = v.trim() || 'Access Log'; save(); this.plugin.refreshGraph(true); }, 800, true)));
+
+    new Setting(containerEl).setName('Cinematic camera').setHeading();
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'The camera flies through the brain on an endless path that never repeats. Toggle with C or the clapperboard button; touching the brain hands control back to you.',
+    });
+    toggle('Start when the brain opens', 'Begin each session with the flythrough.', 'cinemaOnOpen');
+    new Setting(containerEl).setName('Resume after idle').setDesc('Seconds without input before the flythrough starts again. 0 = never. Switching it off yourself (button, C) always keeps it off.').addSlider((sl) =>
+      sl.setLimits(0, 600, 15).setValue(s.cinemaIdle).setDynamicTooltip().onChange((v) => { s.cinemaIdle = v; save(); for (const view of this.plugin.views()) view.applyCinema(); }));
+    new Setting(containerEl).setName('Flight speed').addSlider((sl) =>
+      sl.setLimits(0.3, 2, 0.1).setValue(s.cinemaSpeed).setDynamicTooltip().onChange((v) => { s.cinemaSpeed = v; save(); for (const view of this.plugin.views()) view.applyCinema(); }));
+
+    new Setting(containerEl).setName('Agent teamwork').setHeading();
+    new Setting(containerEl).setName('Claims').setDesc('When an agent edits a note, it holds it for a while. If another agent tries to edit it, its pre-write hook hears who holds it and gets the handoff. Warn: the first try is held back with that message, a retry goes through. Block: held back until the claim ends.')
+      .addDropdown((d) => d.addOptions({ warn: 'Warn (retry goes through)', block: 'Block', off: 'Off' }).setValue(s.claimMode).onChange((v) => { s.claimMode = v as PlexusSettings['claimMode']; save(); }));
+    slider('Claim length', 'Minutes an edit keeps a note claimed (renewed by each edit).', 'claimMinutes', 5, 120, 5);
+    new Setting(containerEl).setName('Agents that can hear replies').setDesc('Comma-separated agent names whose pre-write hook reads H!V3MYND\'s reply (Claude Code\'s hook format).')
+      .addText((t) => t.setValue(s.hookReplies).onChange((v) => { s.hookReplies = v; save(); }));
+    toggle('Handoffs', 'When an agent picks up notes another agent worked on and stepped away from, build a handoff pack and light its trail in the brain.', 'handoffs');
+    toggle('Trust warnings', 'Before an agent edits, warn it once if it is relying on a note with a low trust score (old, re-read a lot, or edits undone).', 'trustWarnings');
+    new Setting(containerEl).setName('Gap notes folder').setDesc('Where the gap radar creates starter notes.')
+      .addText((t) => t.setValue(s.gapFolder).onChange((v) => { s.gapFolder = v.trim(); save(); }));
+
+    toggle('Live presence rings', 'Ring the note each active agent is working on right now, in its colour.', 'presenceRings', () => this.plugin.refreshMarkers());
+    new Setting(containerEl).setName('Secret scanner').setDesc('Keys and tokens in an agent\'s edit: warn it once, block the edit, or off. Also keeps them out of the access log and bridge history.')
+      .addDropdown((d) => d.addOptions({ warn: 'Warn (retry goes through)', block: 'Block', off: 'Off' }).setValue(s.secretScan).onChange((v) => { s.secretScan = v as PlexusSettings['secretScan']; save(); }));
+    toggle('Mask secrets agents write', 'If a key or token still lands in a note, replace it with a masked stub. Recorded as a change you can undo.', 'autoMaskSecrets');
+
+    new Setting(containerEl).setName('Performance').setHeading();
+    toggle('Low-latency mode', 'For slower machines: no bloom, depth of field, nebula, sparks, close-up marbles or brief time-lapses.', 'lowLatency', () => this.plugin.applyLowLatency());
+
+    new Setting(containerEl).setName('Even G2 glasses').setHeading();
+    containerEl.createEl('p', { cls: 'setting-item-description', text: 'Short lines for the glasses: the daily brief and approval requests. Glasses apps can also read GET /hud. Sending goes through the Agent Bridge to the glasses agent.' });
+    toggle('Send to glasses', 'Off until your glasses are connected to the bridge.', 'glassesFeed');
+    new Setting(containerEl).setName('Bridge address').addText((t) => t.setValue(s.bridgeUrl).onChange((v) => { s.bridgeUrl = v.trim(); save(); }));
+    new Setting(containerEl).setName('Bridge token file').setDesc('The bridge\'s tokens.json; the sender\'s token is read from it when sending, never stored here.')
+      .addText((t) => t.setValue(s.bridgeTokenFile).onChange((v) => { s.bridgeTokenFile = v.trim(); save(); }));
+    new Setting(containerEl).setName('Send as / to').setDesc('Bridge agent names: sender and the glasses recipient.')
+      .addText((t) => t.setPlaceholder('claude').setValue(s.glassesSender).onChange((v) => { s.glassesSender = v.trim(); save(); }))
+      .addText((t) => t.setPlaceholder('glasses').setValue(s.glassesRecipient).onChange((v) => { s.glassesRecipient = v.trim(); save(); }))
+      .addButton((b) => b.setButtonText('Test').onClick(async () => { const on = s.glassesFeed; s.glassesFeed = true; await this.plugin.toGlasses('Test from H!V3MYND: the glasses feed works.'); s.glassesFeed = on; new Notice('Sent a test line to the glasses inbox.'); }));
+
+    new Setting(containerEl).setName('Daily brief').setHeading();
+    toggle('Write a daily brief', 'Each morning, write a note summarising the previous day of agent work.', 'briefEnabled');
+    slider('Brief time', 'Hour of the day (24 h) after which yesterday\'s brief is written.', 'briefHour', 0, 23, 1);
+    new Setting(containerEl).setName('Brief folder').addText((t) => t.setValue(s.briefFolder).onChange((v) => { s.briefFolder = v.trim(); save(); }));
+    toggle('Record a time-lapse', 'Record a 30-second video of the day\'s activity in the brain for each brief (needs the brain view open).', 'briefTimelapse');
+    slider('Keep time-lapses (days)', 'Older videos move to the trash.', 'timelapseKeepDays', 1, 60, 1);
+    new Setting(containerEl).addButton((b) => b.setButtonText('Write today\'s brief now').onClick(() => void this.plugin.writeBrief(new Date(), s.briefTimelapse)));
 
     new Setting(containerEl).setName('Music reactivity').setHeading();
     containerEl.createEl('p', {
@@ -1955,4 +3416,129 @@ const SECRET_FIELDS: [string, string][] = [
 ];
 
 /** Listener routes that only answer in Developer mode. */
-const DEV_ROUTES = new Set(['/replay', '/focus', '/music', '/system-audio-probe', '/audio-probe', '/audio-levels', '/audio-devices', '/report', '/meaning', '/heat', '/open-monitor', '/reload']);
+const DEV_ROUTES = new Set(['/replay', '/focus', '/music', '/system-audio-probe', '/audio-probe', '/audio-levels', '/audio-devices', '/report', '/meaning', '/heat', '/open-monitor', '/reload', '/snapshot']);
+
+// ------------------------------------------------------------------ span helpers
+
+/** A monitor, in screen coordinates (DIP). */
+interface SpanDisplay { id: string; name: string; x: number; y: number; w: number; h: number; primary: boolean }
+
+interface ElectronRect { x: number; y: number; width: number; height: number }
+interface ElectronWindow {
+  getTitle(): string;
+  getBounds(): ElectronRect;
+  setBounds(r: ElectronRect): void;
+  setFullScreen(on: boolean): void;
+  focus(): void;
+  isDestroyed(): boolean;
+}
+interface ElectronRemote {
+  screen: {
+    getAllDisplays(): { id: number; label?: string; bounds: ElectronRect }[];
+    getPrimaryDisplay(): { id: number };
+  };
+  BrowserWindow: { getAllWindows(): ElectronWindow[] };
+}
+
+/** Obsidian's desktop app exposes Electron's remote module to plugins. */
+function electronRemote(): ElectronRemote | null {
+  if (!Platform.isDesktopApp) return null;
+  try {
+    const req = (window as unknown as { require?: (m: string) => unknown }).require;
+    const electron = req?.('electron') as { remote?: ElectronRemote } | undefined;
+    return electron?.remote ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The Electron window behind a pop-out document: tagged by a unique title, else by position. */
+async function findWindow(remote: ElectronRemote, doc: Document, d: SpanDisplay): Promise<ElectronWindow | null> {
+  const tag = `hivemynd-span-${d.id}-${Date.now()}`;
+  for (let i = 0; i < 25; i++) {
+    doc.title = tag;
+    const wins = remote.BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
+    const byTitle = wins.find((w) => w.getTitle() === tag);
+    if (byTitle) return byTitle;
+    await new Promise((r) => window.setTimeout(r, 80));
+  }
+  const inside = remote.BrowserWindow.getAllWindows().filter((w) => {
+    if (w.isDestroyed()) return false;
+    const b = w.getBounds();
+    return Math.abs(b.x - (d.x + 40)) < 30 && Math.abs(b.y - (d.y + 40)) < 30;
+  });
+  return inside[inside.length - 1] ?? null;
+}
+
+// ------------------------------------------------------------------ small helpers
+
+function json(res: any, body: unknown) {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function readJson(req: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c: string) => { body += c; if (body.length > 200_000) { req.destroy(); reject(new Error('too large')); } });
+    const fail = (err: unknown) => reject(err instanceof Error ? err : new Error(String(err)));
+    req.on('end', () => { try { resolve(body.trim() ? JSON.parse(body) : {}); } catch (err) { fail(err); } });
+    req.on('error', fail);
+  });
+}
+
+function ymd(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** File-name-safe title for a gap starter note. */
+function stubName(title: string) {
+  return title.replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+/** Every string value inside a hook's tool_input (content, new_string, edits, ...). */
+function hookStrings(v: unknown, out: string[] = [], depth = 0): string[] {
+  if (depth > 5 || out.length > 200) return out;
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) for (const x of v) hookStrings(x, out, depth + 1);
+  else if (v && typeof v === 'object') for (const x of Object.values(v)) hookStrings(x, out, depth + 1);
+  return out;
+}
+
+/** F15: pick a folder to focus the brain on. */
+class FolderPick extends FuzzySuggestModal<TFolder> {
+  constructor(app: App, private pick: (path: string) => void) {
+    super(app);
+    this.setPlaceholder('Focus the brain on a project folder…');
+  }
+  getItems() { return this.app.vault.getAllLoadedFiles().filter((f): f is TFolder => f instanceof TFolder && !f.isRoot()); }
+  getItemText(f: TFolder) { return f.path; }
+  onChooseItem(f: TFolder) { this.pick(f.path); }
+}
+
+/** Shape cycle intervals offered in the theme menu (seconds, label). */
+const CYCLES: [number, string][] = [[0, 'Off'], [30, '30 seconds'], [60, '1 minute'], [300, '5 minutes'], [600, '10 minutes']];
+
+/** Agent orbit modes offered in the theme menu (id, label). */
+const ORBITS: [string, string][] = [['default', 'Default'], ['solar', 'Solar system'], ['atom', 'Atom'], ['close', 'Close orbit'], ['far', 'Wide orbit'], ['still', 'Parked']];
+
+/** Orbit path colours offered in the theme menu (id or hex, label). */
+const ORBIT_COLORS: [string, string][] = [
+  ['default', 'Default (agent colours)'], ['#ffffff', 'White'], ['#ff3b30', 'Red'], ['#ff9500', 'Orange'], ['#ffd60a', 'Yellow'],
+  ['#34c759', 'Green'], ['#2fd3c9', 'Teal'], ['#0a84ff', 'Blue'], ['#bf5af2', 'Purple'], ['#ff375f', 'Pink'], ['#e8b04b', 'Gold'], ['rainbow', 'Rainbow'],
+];
+
+/** The light show's eight colours for a chosen colour: shades of one colour, a rainbow, or the palette. */
+function musicColors(choice: string, palette: string[]): string[] {
+  if (!choice || choice === 'default') return palette;
+  const hsl = (h: number, sat: number, l: number) => {
+    const f = (n: number) => { const k = (n + h * 12) % 12; const a = sat * Math.min(l, 1 - l); return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, '0'); };
+    return `#${f(0)}${f(8)}${f(4)}`;
+  };
+  if (choice === 'rainbow') return Array.from({ length: 8 }, (_, i) => hsl(i / 8, 0.95, 0.55));
+  // One colour: the colour itself plus lighter shades for the highs.
+  const mix = (hex: string, t: number) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)); return `#${c.map((v) => Math.round(v + (255 - v) * t).toString(16).padStart(2, '0')).join('')}`; };
+  return [0, 0.08, 0.15, 0.05, 0.35, 0.25, 0.12, 0.45].map((t) => mix(choice, t));
+}
+

@@ -8,6 +8,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { startLayout, LayoutRunner, hubThreshold } from './layout';
 import { Neural, NeuralSink, Mode, MAX_AGENTS } from './neural';
 import type { BrainStats } from './monitor';
+import type { BrainTheme } from './themes';
+import { shapeCloud } from './shapes';
 import type { AudioReactor } from './audio';
 import * as GL from './shaders';
 
@@ -35,6 +37,10 @@ export interface AudioControls {
   select(id: string): void;
   /** Listen to every source briefly and switch to the one carrying sound. */
   detect(): Promise<string>;
+  /** Light-show colour: 'default' (multicolour palette), 'rainbow' or a hex colour. */
+  colorOptions(): [string, string][];
+  color(): string;
+  setColor(id: string): void;
 }
 
 export interface PlexusOptions {
@@ -115,6 +121,23 @@ const MAX_TRIS = 7000;
 const MODE: Record<TouchMode, Mode> = { read: Mode.Read, scan: Mode.Scan, write: Mode.Write };
 const MODE_LABEL = ['read', 'scan', 'write'];
 
+/** Vertical field of view of a normal view (and of the main monitor when spanning). */
+const BASE_FOV = 50;
+
+/** One monitor's part of a picture spread across several (all in screen pixels). */
+export interface SpanSlice {
+  /** Size of the whole virtual screen, centred on the main monitor. */
+  fullW: number;
+  fullH: number;
+  /** This monitor's rectangle inside it. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Height of the main (centre) monitor: it keeps the normal field of view. */
+  mainH: number;
+}
+
 const seedOf = (i: number) => { const s = Math.sin(i * 12.9898 + 78.233) * 43758.5453; return s - Math.floor(s); };
 function hashStr(s: string) {
   let h = 2166136261;
@@ -142,6 +165,25 @@ export class PlexusRenderer {
 
   // Uniform objects shared by every material, so one write updates them all.
   private u = {
+    /** 1 in the light theme: notes are drawn as oil blobs instead of glass orbs. */
+    uLightMode: { value: 0 },
+    /** 0 in low-latency mode (skips the close-up marble detail). */
+    uDetail: { value: 1 },
+    /** 1 in Multiverse: close-up notes become turning galaxies. */
+    uMarbles: { value: 1 },
+    /** 1 in Mycelium: notes are mushrooms, links bend into tendrils, sparks follow. */
+    uMycelium: { value: 0 },
+    uDew: { value: 0 },
+    /** 1 in Lifeblood: blood boluses pump along the links on a heartbeat. */
+    uBlood: { value: 0 },
+    /** Lifeblood with music on: seconds since the last kick (each kick is one heartbeat); -1 = beat on its own clock. */
+    uHeart: { value: -1 },
+    /** 1 in Matrix: notes are code glyphs and data packets stream along links. */
+    uGlyph: { value: 0 },
+    /** Matrix characters (8x8 atlas), drawn once from the system's Japanese fonts. */
+    uGlyphAtlas: { value: null as THREE.Texture | null },
+    uData: { value: 0 },
+    uSharp: { value: 0 },
     uTime: { value: 0 },
     uDrift: { value: 1 },
     uFocus: { value: 500 },
@@ -230,6 +272,7 @@ export class PlexusRenderer {
   private expand = 0;
   private expandVel = 0;
   private lastBeat = 0;
+  private lastKick = -1;
   private midAcc = 0;
   private highAcc = 0;
   private musicReturns: { t: number; edge: number; fromA: boolean; dur: number; kind: number }[] = [];
@@ -246,7 +289,9 @@ export class PlexusRenderer {
     this.container = container;
     this.opts = { ...options };
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', stencil: false });
+    // The canvas belongs to the view's own document, so the brain also renders in pop-out windows.
+    const canvas = container.createEl('canvas');
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false });
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.setClearColor(0x000000, 1);
     this.canvas = this.renderer.domElement;
@@ -254,14 +299,16 @@ export class PlexusRenderer {
     if (getComputedStyle(container).position === 'static') container.setCssStyles({ position: 'relative' });
     container.appendChild(this.canvas);
 
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.5, 50000);
+    this.camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.5, 50000);
     this.camera.position.set(0, 80, 700);
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.06;
     this.controls.rotateSpeed = 0.5;
     this.controls.zoomSpeed = 0.8;
-    this.controls.addEventListener('start', () => { this.fit = false; this.resumeRotateAt = Infinity; });
+    this.controls.addEventListener('start', () => { this.fit = false; this.resumeRotateAt = Infinity; this.noteInput(); });
+    this.canvas.addEventListener('wheel', () => this.noteInput(), { passive: true });
+    this.canvas.addEventListener('pointerdown', () => this.noteInput());
     this.controls.addEventListener('end', () => { this.resumeRotateAt = this.time + 6; });
 
     const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: this.opts.msaa ? 4 : 0 });
@@ -270,7 +317,7 @@ export class PlexusRenderer {
     this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 1, 0.7, 0.1);
     this.composer.addPass(this.bloom);
     this.finish = new ShaderPass({
-      uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: 0.6 }, uRes: { value: new THREE.Vector2(1, 1) }, uLight: { value: 0 }, uPaper: { value: new THREE.Color('#f8f8f7') } },
+      uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: 0.6 }, uRes: { value: new THREE.Vector2(1, 1) }, uLight: { value: 0 }, uPaper: { value: new THREE.Color('#f8f8f7') }, uSpan: this.uSpan, uVig: this.uVig },
       vertexShader: GL.FINISH_VERT,
       fragmentShader: GL.FINISH_FRAG,
     });
@@ -286,6 +333,11 @@ export class PlexusRenderer {
           uNebula: { value: new THREE.Color() },
           uCam: { value: new THREE.Vector2() },
           uAmount: { value: 1 },
+          uBg: { value: new THREE.Color(0, 0, 0) },
+          uRain: { value: 0 },
+          uGlyphAtlas: this.u.uGlyphAtlas,
+          uSpan: this.uSpan,
+          uVig: this.uVig,
         },
         vertexShader: GL.NEBULA_VERT,
         fragmentShader: GL.NEBULA_FRAG,
@@ -322,7 +374,402 @@ export class PlexusRenderer {
     this.resizeObserver.observe(container);
     this.setOptions(this.opts);
     this.resize();
-    this.renderer.setAnimationLoop(this.frame);
+    this.startLoop();
+  }
+
+  // Frames run on the animation clock of the window the view lives in. A pop-out on
+  // another monitor keeps rendering even when the main window is covered or minimised.
+  private raf = 0;
+  private rafWin: Window | null = null;
+  private startLoop() {
+    const tick = () => {
+      const win = this.container.ownerDocument.defaultView ?? window;
+      this.rafWin = win;
+      this.raf = win.requestAnimationFrame(tick);
+      this.frame();
+    };
+    this.rafWin = this.container.ownerDocument.defaultView ?? window;
+    this.raf = this.rafWin.requestAnimationFrame(tick);
+  }
+
+  // ---------------------------------------------------------------- multi-monitor span
+  // Several views, one per monitor, show one picture. Every view renders the same scene
+  // through the same camera; each draws only its monitor's slice of a large virtual
+  // screen centred on the main monitor. The view on the main monitor leads (camera,
+  // flythrough, layout); the others follow it every frame.
+
+  private uSpan = { value: new THREE.Vector4(-0.5, -0.5, 1, 1) };
+  private uVig = { value: new THREE.Vector2(1, 1) };
+  private slice: SpanSlice | null = null;
+  private leader: PlexusRenderer | null = null;
+  private posVersion = 0;
+  private seenVersion = -1;
+  /** Skip rendering (e.g. the normal view while the brain spans the monitors). */
+  paused = false;
+  disposed = false;
+
+  /** Show only this slice of the virtual screen (null = the whole view, as normal). */
+  setSlice(slice: SpanSlice | null) {
+    this.slice = slice;
+    this.resize();
+  }
+
+  /** Follow another view's camera and layout every frame (null = run on its own). */
+  setLeader(leader: PlexusRenderer | null) {
+    this.leader = leader;
+    this.seenVersion = -1;
+    this.controls.enabled = !leader;
+    this.canvas.style.cursor = leader ? 'default' : 'grab';
+    if (leader) this.setCinema(false);
+  }
+
+  // ---------------------------------------------------------------- team markers & trails
+
+  private markers: THREE.Points | null = null;
+  private markerIdx = new Int32Array(0);
+  private trails: { line: THREE.Line; born: number; life: number; idx: Int32Array }[] = [];
+
+  /**
+   * Rings around notes: claimed notes (agent colour, pulsing) and gaps (faint dashed).
+   * Pass graph indices; replaces the previous set.
+   */
+  setMarkers(list: { index: number; color: string; style: 'claim' | 'gap' }[]) {
+    if (this.markers) {
+      this.scene.remove(this.markers);
+      this.markers.geometry.dispose();
+      (this.markers.material as THREE.Material).dispose();
+      this.markers = null;
+    }
+    const ok = list.filter((m) => m.index >= 0 && m.index < this.n);
+    this.markerIdx = Int32Array.from(ok, (m) => m.index);
+    if (!ok.length) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ok.length * 3), 3));
+    const col = new Float32Array(ok.length * 3), style = new Float32Array(ok.length);
+    const c = new THREE.Color();
+    ok.forEach((m, k) => {
+      c.set(m.style === 'gap' ? '#7d8f95' : m.color);
+      col.set([c.r, c.g, c.b], k * 3);
+      style[k] = m.style === 'gap' ? 1 : 0;
+    });
+    g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    g.setAttribute('aStyle', new THREE.BufferAttribute(style, 1));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: this.u.uTime, uPixelScale: this.u.uPixelScale, uSize: { value: Math.max(6, this.opts.nodeSize * 9) } },
+      vertexShader: GL.MARKER_VERT,
+      fragmentShader: GL.MARKER_FRAG,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.markers = new THREE.Points(g, mat);
+    this.markers.frustumCulled = false;
+    this.markers.renderOrder = 6;
+    this.scene.add(this.markers);
+    this.updateMarkers();
+  }
+
+  private updateMarkers() {
+    if (!this.markers) return;
+    const attr = this.markers.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const out = attr.array as Float32Array, P = this.positions, idx = this.markerIdx;
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k] * 3;
+      out[k * 3] = P[i]; out[k * 3 + 1] = P[i + 1]; out[k * 3 + 2] = P[i + 2];
+    }
+    attr.needsUpdate = true;
+  }
+
+  /** Light a path through these notes in order (a handoff: the work that came before). */
+  trail(indices: number[], color: string) {
+    const idx = Int32Array.from(indices.filter((i) => i >= 0 && i < this.n));
+    if (idx.length < 1) return;
+    const pts = Array.from(idx, (i) => new THREE.Vector3(this.positions[i * 3], this.positions[i * 3 + 1], this.positions[i * 3 + 2]));
+    if (pts.length === 1) pts.push(pts[0].clone().add(new THREE.Vector3(0, this.radius * 0.05, 0)));
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+    const samples = curve.getPoints(Math.min(1200, pts.length * 24));
+    const g = new THREE.BufferGeometry().setFromPoints(samples);
+    g.setAttribute('aT', new THREE.BufferAttribute(Float32Array.from(samples, (_, i) => i / (samples.length - 1)), 1));
+    const dur = Math.min(9, 2 + idx.length * 0.5), hold = 10;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: this.u.uTime, uStart: { value: this.time }, uDur: { value: dur }, uHold: { value: hold }, uColor: { value: new THREE.Color(color).multiplyScalar(0.9) } },
+      vertexShader: GL.ARC_VERT,
+      fragmentShader: GL.TRAIL_FRAG,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const line = new THREE.Line(g, mat);
+    line.frustumCulled = false;
+    line.renderOrder = 5;
+    this.scene.add(line);
+    this.trails.push({ line, born: this.time, life: dur + hold + 3, idx });
+    for (const i of idx) this.highlight(i);
+  }
+
+  private updateTrails() {
+    while (this.trails.length && this.time - this.trails[0].born > this.trails[0].life) {
+      const { line } = this.trails.shift()!;
+      this.scene.remove(line);
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
+  }
+
+  /**
+   * Low-latency mode for slower machines: no bloom, no depth of field, no nebula, no
+   * sparks, no marble detail, and at most one pixel per screen pixel.
+   */
+  lowLatency = false;
+  setLowLatency(on: boolean) {
+    if (on === this.lowLatency) return;
+    this.lowLatency = on;
+    this.bloom.enabled = !on;
+    this.nebula.visible = !on;
+    this.sparks.visible = !on;
+    this.u.uDetail.value = on ? 0 : 1;
+    this.resize();
+  }
+
+  /**
+   * Render one frame now and return it as a PNG. Works while the window is hidden or
+   * minimised (no animation frames needed). Optionally look at note `index` from
+   * `dist` away, and/or in the other theme; the camera and theme are restored after.
+   */
+  async snapshot(o: { index?: number; dist?: number; light?: boolean; fit?: boolean } = {}): Promise<Blob | null> {
+    const pos = this.camera.position.clone(), quat = this.camera.quaternion.clone(), target = this.controls.target.clone();
+    const theme = this.light;
+    if (o.light !== undefined) this.setTheme(o.light);
+    if (o.index !== undefined && o.index >= 0 && o.index < this.n) {
+      const p = new THREE.Vector3(this.positions[o.index * 3], this.positions[o.index * 3 + 1], this.positions[o.index * 3 + 2]);
+      const dir = pos.clone().sub(p).normalize();
+      this.camera.position.copy(p).addScaledVector(dir, o.dist ?? 20);
+      this.controls.target.copy(p);
+      this.camera.lookAt(p);
+    }
+    if (o.fit) {
+      // Whole brain in view: back off from the centre along the current view direction.
+      this.updateBounds();
+      const dir = pos.clone().sub(this.centroid).normalize();
+      this.camera.position.copy(this.centroid).addScaledVector(dir, this.radius * (o.dist ?? 4.5));
+      this.controls.target.copy(this.centroid);
+      this.camera.lookAt(this.centroid);
+    }
+    this.camera.updateMatrixWorld();
+    this.cameraUniforms();
+    this.updateSatellites();
+    this.composer.render(0);
+    const blob = await new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve, 'image/png'));
+    this.camera.position.copy(pos);
+    this.camera.quaternion.copy(quat);
+    this.controls.target.copy(target);
+    this.cameraUniforms();
+    if (o.light !== undefined) this.setTheme(theme);
+    return blob;
+  }
+
+  // ---------------------------------------------------------------- shapes
+  // The layout's positions live in `base`; what's drawn (and picked, labelled, linked)
+  // is `positions`: the base reshaped into the chosen shape. Saved layouts use base.
+
+  private base = new Float32Array(0);
+  private shapeTarget = new Float32Array(0);
+  private shape = 'default';
+  private shapeTick = 0;
+  private morph: { from: Float32Array; t0: number } | null = null;
+
+  /** Reshape the brain. `animate` morphs from the current shape over about 1.6 s. */
+  setShape(id: string, animate = true) {
+    if (id === this.shape && !animate) return;
+    this.shape = id;
+    if (this.leader) return; // followers copy the leader's positions
+    this.reshape(animate);
+  }
+
+  // Clustering (-1 spread .. 0 as laid out .. +1 tight): each note moves toward (or away
+  // from) the average of the notes it links to, a few rounds, on top of the shape.
+  private cluster = 0;
+  private shaped = new Float32Array(0);
+  private adj: { start: Int32Array; list: Int32Array } | null = null;
+
+  setCluster(v: number, animate = false) {
+    const c = Math.max(-1, Math.min(1, v));
+    if (c === this.cluster) return;
+    this.cluster = c;
+    if (this.leader || !this.n || this.shaped.length !== this.n * 3) return;
+    this.applyCluster();
+    if (animate && !this.morph) this.morph = { from: Float32Array.from(this.positions), t0: this.time };
+    if (this.morph) return;
+    this.positions.set(this.shapeTarget);
+    this.syncPositions();
+    this.updateBounds();
+  }
+
+  private neighbours() {
+    if (this.adj) return this.adj;
+    const n = this.n, P = this.realPairs;
+    const deg = new Int32Array(n + 1);
+    for (let k = 0; k < P.length; k++) deg[P[k] + 1]++;
+    for (let i = 0; i < n; i++) deg[i + 1] += deg[i];
+    const list = new Int32Array(P.length), fill = deg.slice(0, n);
+    for (let k = 0; k < P.length; k += 2) { const a = P[k], b = P[k + 1]; list[fill[a]++] = b; list[fill[b]++] = a; }
+    this.adj = { start: deg, list };
+    return this.adj;
+  }
+
+  /** shapeTarget = shaped cloud, pulled together (or pushed apart) along links. */
+  private applyCluster() {
+    const out = this.shapeTarget;
+    out.set(this.shaped);
+    const c = this.cluster;
+    if (Math.abs(c) < 0.01) return;
+    const { start, list } = this.neighbours();
+    const n = this.n, rounds = c > 0 ? 4 : 2;
+    const step = c > 0 ? 0.55 * c : 0.4 * c;
+    const limit = this.radius * 0.35;
+    const tmp = new Float32Array(out.length);
+    for (let r = 0; r < rounds; r++) {
+      tmp.set(out);
+      for (let i = 0; i < n; i++) {
+        const s = start[i], e = start[i + 1];
+        if (e === s) continue;
+        let x = 0, y = 0, z = 0;
+        for (let k = s; k < e; k++) { const j = list[k] * 3; x += tmp[j]; y += tmp[j + 1]; z += tmp[j + 2]; }
+        const m = e - s;
+        let dx = (x / m - tmp[i * 3]) * step, dy = (y / m - tmp[i * 3 + 1]) * step, dz = (z / m - tmp[i * 3 + 2]) * step;
+        const len = Math.hypot(dx, dy, dz);
+        if (len > limit) { const f = limit / len; dx *= f; dy *= f; dz *= f; }
+        out[i * 3] += dx; out[i * 3 + 1] += dy; out[i * 3 + 2] += dz;
+      }
+    }
+  }
+
+  private reshape(animate: boolean) {
+    if (!this.n || this.base.length !== this.n * 3) return;
+    if (this.shaped.length !== this.n * 3) this.shaped = new Float32Array(this.n * 3);
+    shapeCloud(this.shape, this.base, this.shaped);
+    this.applyCluster();
+    if (animate) {
+      this.morph = { from: Float32Array.from(this.positions), t0: this.time };
+      return;
+    }
+    if (this.morph) return; // a running morph picks up the new target
+    this.positions.set(this.shapeTarget);
+    this.syncPositions();
+  }
+
+  private stepMorph() {
+    const m = this.morph!;
+    const k = Math.min(1, (this.time - m.t0) / 1.6);
+    const e = k * k * (3 - 2 * k);
+    const P = this.positions, A = m.from, B = this.shapeTarget;
+    if (A.length !== P.length || B.length !== P.length) { this.morph = null; return; }
+    for (let i = 0; i < P.length; i++) P[i] = A[i] + (B[i] - A[i]) * e;
+    this.syncPositions();
+    if (++this.shapeTick % 6 === 0 || k >= 1) this.updateBounds();
+    if (k >= 1) {
+      this.morph = null;
+      // Proximity threads were found for the old shape: find them again for this one.
+      if (this.settled) this.rebuildLinks();
+    }
+  }
+
+  /**
+   * The digital-rain characters from the films: half-width katakana (mirrored, as on
+   * screen), digits and a few symbols, white on transparent in an 8x8 atlas.
+   */
+  private matrixAtlas() {
+    const CH = 'ｦｱｳｴｵｶｷｹｺｻｼｽｾｿﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜｲｸﾁﾄﾉﾌﾍﾖﾙﾚﾛﾝ012345789Z:."=*+-<>¦|';
+    const N = 8, S = 64;
+    const cv = this.container.createEl('canvas');
+    cv.detach(); // drawn offscreen, never shown
+    cv.width = cv.height = N * S;
+    const ctx = cv.getContext('2d')!;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${Math.round(S * 0.78)}px "MS Gothic", "Yu Gothic", "Meiryo", "Hiragino Kaku Gothic Pro", "Noto Sans JP", monospace`;
+    const chars = Array.from(CH).slice(0, N * N);
+    chars.forEach((ch, i) => {
+      const x = (i % N) * S + S / 2, y = Math.floor(i / N) * S + S / 2;
+      ctx.save();
+      ctx.translate(x, y);
+      if (!/[0-9Z:."=*+\-<>¦|]/.test(ch)) ctx.scale(-1, 1); // katakana are mirrored in the films
+      ctx.fillText(ch, 0, 0);
+      ctx.restore();
+    });
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  // ---------------------------------------------------------------- cross-dissolve
+  // Theme changes can't all blend continuously (code rain, threads, dew drops switch
+  // on and off), so the old frame is frozen on top and faded out over the new look.
+
+  private fadeJob: (() => void) | null = null;
+  private fadeLayer: HTMLCanvasElement | null = null;
+  private fades = { dissolved: 0, direct: 0 };
+
+  /** Apply `change` with a ~1.6 s cross-dissolve from the current picture. */
+  crossfade(change: () => void) {
+    if (this.paused || !this.container.isConnected || this.container.clientWidth === 0) { change(); return; }
+    if (this.fadeJob) { const prev = this.fadeJob; this.fadeJob = () => { prev(); change(); }; return; }
+    this.fadeJob = change;
+    // No frame within a second (hidden window): just apply it.
+    window.setTimeout(() => { if (this.fadeJob === change) { this.fadeJob = null; this.fades.direct++; change(); } }, 1000);
+  }
+
+  private runCrossfade() {
+    const job = this.fadeJob!;
+    this.fadeJob = null;
+    this.fades.dissolved++;
+    let layer = this.fadeLayer;
+    if (!layer) layer = this.fadeLayer = this.container.createEl('canvas', { cls: 'plexus-fade-layer' });
+    layer.width = this.canvas.width;
+    layer.height = this.canvas.height;
+    // Copy the frame just drawn (same task as the render, so the buffer is intact).
+    layer.getContext('2d')?.drawImage(this.canvas, 0, 0);
+    layer.removeClass('is-fading');
+    layer.setCssStyles({ opacity: '1' });
+    job();
+    void layer.offsetWidth; // restart the CSS transition
+    layer.addClass('is-fading');
+    layer.setCssStyles({ opacity: '0' });
+  }
+
+  /** Start from another view's camera, so opening a new view doesn't jump. */
+  copyCameraFrom(other: PlexusRenderer) {
+    this.camera.position.copy(other.camera.position);
+    this.camera.quaternion.copy(other.camera.quaternion);
+    this.controls.target.copy(other.controls.target);
+    this.fit = false;
+  }
+
+  private followLeader() {
+    const L = this.leader!;
+    if (L.disposed || L.n !== this.n) return;
+    if (L.posVersion !== this.seenVersion) {
+      this.seenVersion = L.posVersion;
+      this.positions.set(L.positions);
+      this.syncPositions();
+      this.centroid.copy(L.centroid);
+      this.radius = L.radius;
+    }
+    if (L.settled && !this.settled) {
+      this.settled = true;
+      this.layout?.dispose();
+      this.layout = null;
+      this.rebuildLinks();
+    } else if (!L.settled && this.settled) {
+      this.settled = false;
+    }
   }
 
   // ---------------------------------------------------------------- public API
@@ -337,9 +784,13 @@ export class PlexusRenderer {
     this.graph = graph;
     const n = (this.n = graph.paths.length);
     this.positions = new Float32Array(n * 3);
+    this.base = new Float32Array(n * 3);
+    this.shapeTarget = new Float32Array(n * 3);
+    this.morph = null;
     this.seeds = Float32Array.from({ length: n }, (_, i) => seedOf(i + hashStr(graph.paths[i]) * 997));
     this.degree = new Uint16Array(n);
     this.realPairs = new Int32Array(graph.links.length * 2);
+    this.adj = null;
     graph.links.forEach(([a, b], k) => {
       this.realPairs[2 * k] = a;
       this.realPairs[2 * k + 1] = b;
@@ -366,7 +817,8 @@ export class PlexusRenderer {
     }
     const start = graph.paths.map((p) => live[p] ?? cached?.[p] ?? null);
     this.layout = startLayout(n, graph.layoutLinks ?? graph.links, start, key === 'meaning' ? 'meaning' : 'links');
-    this.layout.writeTo(this.positions);
+    this.layout.writeTo(this.base);
+    this.reshape(false);
     this.settled = false;
     this.layoutFrames = 0;
     this.updateBounds();
@@ -531,6 +983,7 @@ export class PlexusRenderer {
     if (light === this.light) return;
     this.light = light;
     this.finish.uniforms.uLight.value = light ? 1 : 0;
+    this.u.uLightMode.value = light ? 1 : 0;
     // ACES would grey the white paper; light mode writes final colours directly.
     this.renderer.toneMapping = light ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     this.setOptions({});
@@ -538,7 +991,132 @@ export class PlexusRenderer {
   }
 
   /** Node colour for the current theme: light mode swaps the cyan for a deep blue. */
-  private nodeColor() { return this.light ? LIGHT_NODE_COLOR : this.opts.nodeColor; }
+  private nodeColor() { return this.light ? LIGHT_NODE_COLOR : this.palette?.node ?? this.opts.nodeColor; }
+
+  /** A colour scheme (Violet Dusk, Tide Pulse, ...) overriding the Look settings; null = Multiverse / Inkblot. */
+  private palette: BrainTheme | null = null;
+
+  /** Apply a brain theme: dark or light pipeline, colours, background, close-up marbles. */
+  setBrainTheme(t: BrainTheme) {
+    this.palette = t.bg ? t : null;
+    this.u.uMarbles.value = t.marbles ? 1 : 0;
+    this.u.uMycelium.value = t.tendrils ? 1 : 0; // links bend into organic threads
+    this.u.uDew.value = t.dew ? 1 : 0; // notes as dew drops on the threads
+    this.u.uBlood.value = t.blood ? 1 : 0; // blood pumping through the threads
+    this.u.uGlyph.value = this.u.uData.value = this.u.uSharp.value = t.matrix ? 1 : 0;
+    if (t.matrix && !this.u.uGlyphAtlas.value) this.u.uGlyphAtlas.value = this.matrixAtlas();
+    (this.nebula.material as THREE.ShaderMaterial).uniforms.uRain.value = t.matrix ? 1 : 0;
+    this.myceliumOn = !!t.tendrils;
+    this.hideFacets = !!t.tendrils || !!t.matrix; // the translucent facets fight these looks
+    this.syncTendrils();
+    const bg = (this.nebula.material as THREE.ShaderMaterial).uniforms.uBg.value as THREE.Color;
+    bg.set(t.bg ?? '#000000');
+    if (t.light !== this.light) this.setTheme(t.light);
+    else { this.setOptions({}); this.writeTints(); }
+  }
+
+  // ---------------------------------------------------------------- cinematic flythrough
+  // An endless, never-repeating camera path through the brain: a Catmull-Rom spline
+  // over a rolling window of random waypoints (a new one is added as each is passed).
+  // The camera looks a little ahead along the path, drawn toward the brain's centre.
+  // Any pointer or wheel input hands control back to the user.
+
+  /** Seconds without input before the flythrough resumes on its own (0 = never). */
+  cinemaIdleSec = 0;
+  /** Relative flight speed (1 = cross the brain in about half a minute). */
+  cinemaSpeed = 1;
+  onCinemaChange: ((on: boolean) => void) | null = null;
+  private cine = { on: false, pts: [] as THREE.Vector3[], u: 0, look: new THREE.Vector3(), ease: 0 };
+  private lastInput = 0;
+  /** Switched off by the user (button, C key, command): idle never restarts it until they switch it back on. */
+  private cinemaHeld = false;
+
+  get cinemaOn() { return this.cine.on; }
+  /** The WebGL canvas (for recording a time-lapse). */
+  get canvasEl() { return this.canvas; }
+
+  /** `byUser` marks an explicit toggle, which also decides whether idle time may restart the flythrough. */
+  setCinema(on: boolean, byUser = false) {
+    if (byUser) this.cinemaHeld = !on;
+    if (on === this.cine.on) return;
+    this.cine.on = on;
+    if (on) {
+      // Start exactly where the camera is, heading forward, so there's no jump.
+      const here = this.camera.position.clone();
+      const ahead = this.tmpVec.copy(this.controls.target).sub(here).normalize();
+      const behind = here.clone().addScaledVector(ahead, -this.radius * 0.6);
+      this.cine.pts = [behind, here];
+      while (this.cine.pts.length < 5) this.cine.pts.push(this.cinemaPoint(this.cine.pts[this.cine.pts.length - 1]));
+      this.cine.u = 0;
+      this.cine.look.copy(this.controls.target);
+      this.cine.ease = 0;
+      this.followUntil = -1;
+    } else {
+      this.fit = false;
+      this.resumeRotateAt = this.time + 6;
+    }
+    this.lastInput = this.time;
+    this.onCinemaChange?.(on);
+  }
+
+  /** The user chose an auto-start delay: lift a manual stop and count idle time from now. */
+  releaseCinemaHold() {
+    this.cinemaHeld = false;
+    this.lastInput = this.time;
+  }
+
+  /** User touched the view: stop the flythrough and remember when. */
+  private noteInput() {
+    this.lastInput = this.time;
+    if (this.cine.on) this.setCinema(false);
+  }
+
+  /** A random waypoint inside (and sometimes just outside) the brain, never too close to the last. */
+  private cinemaPoint(prev: THREE.Vector3) {
+    const R = Math.max(50, this.radius);
+    const p = new THREE.Vector3();
+    for (let tries = 0; tries < 12; tries++) {
+      const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2, s2 = Math.sqrt(1 - u * u);
+      const r = R * (0.25 + 1.0 * Math.random());
+      p.set(r * s2 * Math.cos(th), r * s2 * Math.sin(th), r * u).add(this.centroid);
+      if (p.distanceTo(prev) > R * 0.7) break;
+    }
+    return p;
+  }
+
+  private catmull(out: THREE.Vector3, p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, t: number) {
+    const t2 = t * t, t3 = t2 * t;
+    const f = (a: number, b: number, c: number, d: number) => 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+    return out.set(f(p0.x, p1.x, p2.x, p3.x), f(p0.y, p1.y, p2.y, p3.y), f(p0.z, p1.z, p2.z, p3.z));
+  }
+
+  private cinePos = new THREE.Vector3();
+  private cineAhead = new THREE.Vector3();
+  private updateCinema(dt: number) {
+    const c = this.cine;
+    const P = c.pts;
+    const seg = Math.max(1, P[1].distanceTo(P[2]));
+    const speed = Math.max(50, this.radius) * 0.07 * this.cinemaSpeed;
+    c.u += (speed * dt) / seg;
+    while (c.u >= 1) {
+      c.u -= 1;
+      P.shift();
+      P.push(this.cinemaPoint(P[P.length - 1]));
+    }
+    this.catmull(this.cinePos, P[0], P[1], P[2], P[3], c.u);
+    // Look ahead along the path; past the end of this segment, use the next one.
+    const la = c.u + 0.35;
+    if (la < 1) this.catmull(this.cineAhead, P[0], P[1], P[2], P[3], la);
+    else this.catmull(this.cineAhead, P[1], P[2], P[3], P[4], la - 1);
+    this.cineAhead.lerp(this.centroid, 0.45);
+    // Ease in over ~2 s from wherever the camera was, then glide.
+    c.ease = Math.min(1, c.ease + dt * 0.5);
+    const k = 1 - Math.exp(-dt * (0.6 + 2.4 * c.ease));
+    this.camera.position.lerp(this.cinePos, k);
+    c.look.lerp(this.cineAhead, 1 - Math.exp(-dt * 1.2));
+    this.controls.target.copy(c.look);
+    this.camera.lookAt(c.look);
+  }
 
   recenter() { this.fit = true; this.followUntil = -1; this.resumeRotateAt = 0; }
 
@@ -546,8 +1124,8 @@ export class PlexusRenderer {
     const prev = this.opts;
     this.opts = { ...this.opts, ...next };
     const o = this.opts;
-    this.u.uFireColor.value.set(o.fireColor);
-    this.u.uLinkColor.value.set(this.light ? LIGHT_LINK_COLOR : o.linkColor).multiplyScalar(0.9);
+    this.u.uFireColor.value.set(this.palette?.accent ?? o.fireColor);
+    this.u.uLinkColor.value.set(this.light ? LIGHT_LINK_COLOR : this.palette?.link ?? o.linkColor).multiplyScalar(this.palette ? (this.palette.mycelium ? 0.55 : this.palette.blood ? 1.0 : this.palette.matrix ? 0.55 : 1.6) : 0.9);
     const lk = this.light ? LIGHT_LINK_ALPHA : 1;
     this.u.uNodeScale.value = o.nodeSize * (this.light ? LIGHT_NODE_SIZE : 1);
     this.u.uLinkAlpha.value = 0.42 * o.linkStrength * this.linkDim * lk;
@@ -555,7 +1133,8 @@ export class PlexusRenderer {
     this.u.uGain.value = this.baseGain * (this.light ? LIGHT_NODE_GAIN : 1);
     this.u.uTriAlpha.value = 0.016 * o.linkStrength * (this.light ? 0.12 : 1);
     o.agents.slice(0, MAX_AGENTS).forEach((a, i) => this.u.uAgentColors.value[i].set(a.color));
-    (this.nebula.material as THREE.ShaderMaterial).uniforms.uNebula.value.set(o.nebulaColor);
+    (this.nebula.material as THREE.ShaderMaterial).uniforms.uNebula.value.set(this.palette?.accent ?? o.nebulaColor);
+    if (this.palette) ((this.nebula.material as THREE.ShaderMaterial).uniforms.uNebula.value as THREE.Color).multiplyScalar(this.palette.matrix ? 0 : 0.35); // Matrix: no haze, only the code rain
     (this.nebula.material as THREE.ShaderMaterial).uniforms.uAmount.value = o.nebula * (this.light ? LIGHT_NEBULA : 1);
     this.finish.uniforms.uGrain.value = o.grain;
     this.bloom.strength = o.bloomStrength * (this.light ? LIGHT_BLOOM : 1);
@@ -569,7 +1148,8 @@ export class PlexusRenderer {
   }
 
   dispose() {
-    this.renderer.setAnimationLoop(null);
+    this.disposed = true;
+    this.rafWin?.cancelAnimationFrame(this.raf);
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.disposeGraph();
@@ -578,6 +1158,10 @@ export class PlexusRenderer {
       (obj.material as THREE.Material).dispose();
     }
     this.composer.dispose();
+    // Hand the WebGL context back right away. Browsers allow only ~16 at once; without
+    // this, every plugin reload leaked one until the brain failed with "Error creating
+    // WebGL context".
+    this.renderer.forceContextLoss();
     this.renderer.dispose();
     this.canvas.remove();
     this.label.remove();
@@ -610,17 +1194,21 @@ export class PlexusRenderer {
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 0.1);
     this.last = now;
-    if (!this.container.isConnected || this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
+    if (this.paused || !this.container.isConnected || this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
 
     this.time += dt;
     this.u.uTime.value = this.time;
     this.finish.uniforms.uTime.value = this.time;
 
-    if (this.layout && !this.settled) {
+    if (this.morph) this.stepMorph();
+    if (this.leader) this.followLeader();
+    else if (this.layout && !this.settled) {
       this.layout.step(8);
       if (this.layout.fresh) {
-        this.layout.writeTo(this.positions);
-        this.syncPositions();
+        this.layout.writeTo(this.base);
+        // Reshaping the whole cloud every frame while the layout settles is wasteful:
+        // keep the shape current every few updates (and always on the last one).
+        if (this.shape === 'default' || this.layout.done || ++this.shapeTick % 8 === 0) this.reshape(false);
       }
       if (++this.layoutFrames % 15 === 0) this.updateBounds();
       if (this.layout.done) this.onLayoutDone();
@@ -642,8 +1230,12 @@ export class PlexusRenderer {
     this.placeLabel();
     this.updateSatellites();
     this.updateArcs();
+    this.updateTrails();
+    if (this.tendrils) this.updateTendrils();
+    if (this.markers && (!this.settled || this.leader)) this.updateMarkers();
     this.updateBolts();
     this.composer.render(dt);
+    if (this.fadeJob) this.runCrossfade();
     this.countFrame(now);
   }
 
@@ -670,15 +1262,127 @@ export class PlexusRenderer {
       label.textContent = a.name;
       this.satellites.set(a.name, { mesh, label, base: (i / list.length) * Math.PI * 2, flash: -1e4 });
     });
+    this.rebuildOrbitLines();
+  }
+
+  // ---------------------------------------------------------------- agent orbits
+  // How the agent satellites circle the brain (a look only; lightning, message arcs and
+  // labels all follow the satellites). Solar and Atom also draw faint orbit paths.
+
+  private orbit = 'default';
+  /** Orbit path colour: 'default' (each agent's colour), 'rainbow', or a hex colour. */
+  private orbitColor = 'default';
+  private orbitLines: THREE.Line[] = [];
+  private orbitTick = 0;
+
+  setOrbit(mode: string) {
+    this.orbit = mode;
+    this.rebuildOrbitLines();
+  }
+
+  setOrbitColor(c: string) {
+    if (c === this.orbitColor) return;
+    this.orbitColor = c;
+    this.rebuildOrbitLines();
+  }
+
+  /** Where the satellite with this base angle is at time t. */
+  private orbitAt(base: number, t: number, out: THREE.Vector3) {
+    const N = Math.max(1, this.satellites.size);
+    const i = Math.round((base / (Math.PI * 2)) * N) % N;
+    const R = this.radius, c = this.centroid;
+    switch (this.orbit) {
+      case 'solar': {
+        // Each agent on its own ring; outer rings turn slower (Kepler), slightly tilted.
+        const r = R * (1.25 + 0.32 * i);
+        const ang = base + t * this.orbitSpeed(i);
+        const tilt = ((i * 0.37) % 0.5) - 0.25;
+        const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+        return out.set(c.x + x, c.y - z * Math.sin(tilt), c.z + z * Math.cos(tilt));
+      }
+      case 'atom': {
+        // Fast orbits on planes spread around the brain, like electrons.
+        const r = R * 1.45;
+        const ang = t * this.orbitSpeed(i) + i * 1.7;
+        const yaw = (i / N) * Math.PI, tilt = 1.05;
+        const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+        const y2 = -z * Math.sin(tilt), z2 = z * Math.cos(tilt);
+        return out.set(c.x + x * Math.cos(yaw) + z2 * Math.sin(yaw), c.y + y2, c.z - x * Math.sin(yaw) + z2 * Math.cos(yaw));
+      }
+      case 'close': {
+        const ang = base + t * 0.05, r = R * 1.06;
+        return out.set(c.x + Math.cos(ang) * r, c.y + Math.sin(ang * 2 + base) * R * 0.05, c.z + Math.sin(ang) * r);
+      }
+      case 'far': {
+        const ang = base + t * 0.012, r = R * 2.2;
+        return out.set(c.x + Math.cos(ang) * r, c.y + Math.sin(ang * 2 + base) * R * 0.2, c.z + Math.sin(ang) * r);
+      }
+      case 'still': {
+        const r = R * 1.3;
+        return out.set(c.x + Math.cos(base) * r, c.y, c.z + Math.sin(base) * r);
+      }
+      default: {
+        const ang = base + t * 0.025, r = R * 1.3;
+        return out.set(c.x + Math.cos(ang) * r, c.y + Math.sin(ang * 2 + base) * R * 0.12, c.z + Math.sin(ang) * r);
+      }
+    }
+  }
+
+  private orbitSpeed(i: number) {
+    if (this.orbit === 'solar') return 0.09 / Math.pow(1.25 + 0.32 * i, 1.5);
+    if (this.orbit === 'atom') return 0.25 + 0.04 * i;
+    return 0;
   }
 
   private satellitePos(base: number, out: THREE.Vector3) {
-    const ang = base + this.time * 0.025;
-    const r = this.radius * 1.3;
-    return out.set(this.centroid.x + Math.cos(ang) * r, this.centroid.y + Math.sin(ang * 2 + base) * this.radius * 0.12, this.centroid.z + Math.sin(ang) * r);
+    return this.orbitAt(base, this.time, out);
+  }
+
+  /** Faint orbit paths for Solar and Atom, in each agent's colour. */
+  private rebuildOrbitLines() {
+    for (const l of this.orbitLines) { this.scene.remove(l); l.geometry.dispose(); (l.material as THREE.Material).dispose(); }
+    this.orbitLines = [];
+    if (this.orbit !== 'solar' && this.orbit !== 'atom') return;
+    for (const s of this.satellites.values()) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(129 * 3), 3));
+      const rainbow = this.orbitColor === 'rainbow';
+      if (rainbow) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(129 * 3), 3));
+      const col = this.orbitColor === 'default' || rainbow
+        ? (s.mesh.material as THREE.MeshBasicMaterial).color.clone().multiplyScalar(0.35)
+        : new THREE.Color(this.orbitColor).multiplyScalar(0.4);
+      const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: rainbow ? 0xffffff : col, vertexColors: rainbow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+      line.frustumCulled = false;
+      line.renderOrder = 3;
+      line.userData.base = s.base;
+      this.scene.add(line);
+      this.orbitLines.push(line);
+    }
+    this.updateOrbitLines();
+  }
+
+  private updateOrbitLines() {
+    const v = new THREE.Vector3();
+    const N = Math.max(1, this.satellites.size);
+    for (const line of this.orbitLines) {
+      const base = line.userData.base as number;
+      const i = Math.round((base / (Math.PI * 2)) * N) % N;
+      const period = (Math.PI * 2) / Math.max(1e-4, this.orbitSpeed(i));
+      const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      for (let k = 0; k <= 128; k++) { this.orbitAt(base, (k / 128) * period, v); attr.setXYZ(k, v.x, v.y, v.z); }
+      attr.needsUpdate = true;
+      // Rainbow: hues flow slowly around each ring.
+      const cattr = line.geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
+      if (cattr) {
+        const c = new THREE.Color();
+        for (let k = 0; k <= 128; k++) { c.setHSL(((k / 128) + this.time * 0.03 + base * 0.1) % 1, 0.9, 0.5).multiplyScalar(0.45); cattr.setXYZ(k, c.r, c.g, c.b); }
+        cattr.needsUpdate = true;
+      }
+    }
   }
 
   private updateSatellites() {
+    if (this.orbitLines.length && ++this.orbitTick % (this.orbitColor === 'rainbow' ? 4 : 30) === 0) this.updateOrbitLines();
     const v = new THREE.Vector3();
     const p = new THREE.Vector2();
     for (const s of this.satellites.values()) {
@@ -756,8 +1460,12 @@ export class PlexusRenderer {
     // Bass hits drive a lightly damped spring: each kick throws the brain outward, it
     // snaps back past its resting size (contracts), then settles. Breathes with the beat.
     const beat = lv?.beat ?? 0;
-    if (lv && beat > 0.95 && this.lastBeat < 0.9) this.expandVel += (0.45 + lv.bass * 0.25) * kb;
+    if (lv && beat > 0.95 && this.lastBeat < 0.9) { this.expandVel += (0.45 + lv.bass * 0.25) * kb; this.lastKick = this.time; }
     this.lastBeat = beat;
+    // Lifeblood: only the kick plays. Each kick is one lub-dub of the heart (blood surges
+    // through the vessels); there are no mid/high sparks and no bass haze.
+    const heart = !!lv && !!this.palette?.blood;
+    u.uHeart.value = heart ? (this.lastKick < 0 ? 99 : Math.min(99, this.time - this.lastKick)) : -1;
     const stiffness = 150, damping = 6;
     const h = Math.min(dt, 1 / 30);
     this.expandVel += (-stiffness * this.expand - damping * this.expandVel) * h;
@@ -767,10 +1475,10 @@ export class PlexusRenderer {
     u.uAudioBeat.value = beat * kb;
     if (a) a.palette.forEach((c, i) => u.uMusicColors.value[i]?.set(c));
     this.bloom.strength = this.opts.bloomStrength * (this.light ? LIGHT_BLOOM : 1) * (1 + (lv ? lv.beat * 0.6 : 0) * kb);
-    (this.nebula.material as THREE.ShaderMaterial).uniforms.uAmount.value = this.opts.nebula * (this.light ? LIGHT_NEBULA : 1) * (1 + (lv?.bass ?? 0) * 0.8 * kb);
+    (this.nebula.material as THREE.ShaderMaterial).uniforms.uAmount.value = this.opts.nebula * (this.light ? LIGHT_NEBULA : 1) * (1 + (heart ? 0 : lv?.bass ?? 0) * 0.8 * kb);
 
     // Light show: spawn rate follows each band's level, scaled by the mid/high sensitivity.
-    if (lv && a && this.edgePairs.length) {
+    if (lv && a && this.edgePairs.length && !heart) {
       const s = k * a.midHigh;
       this.midAcc += dt * lv.mid * lv.mid * 70 * s * a.gains.mid;
       this.highAcc += dt * lv.high * lv.high * 110 * s * a.gains.high;
@@ -799,7 +1507,8 @@ export class PlexusRenderer {
   }
 
   private drawMeter(lv: { bass: number; mid: number; high: number; beat: number } | null) {
-    if (!lv || !this.audio) { if (this.meter) this.meter.setCssStyles({ display: 'none' }); return; }
+    // While spanning, only the centre monitor (the one without a leader) shows the panel.
+    if (!lv || !this.audio || this.meterHidden || this.leader) { if (this.meter) this.meter.setCssStyles({ display: 'none' }); return; }
     if (!this.meter) this.buildMeter();
     this.meter!.setCssStyles({ display: 'block' });
     const bars = this.meter!.querySelectorAll<HTMLElement>('.pxm-bar');
@@ -827,7 +1536,13 @@ export class PlexusRenderer {
     // Keep clicks, drags, wheel and keys inside the panel (not orbiting the brain or
     // triggering the view's single-key shortcuts).
     for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'dblclick', 'click']) m.addEventListener(ev, (e) => e.stopPropagation());
-    m.createDiv({ cls: 'pxm-title', text: '♫ Music' });
+    const head = m.createDiv({ cls: 'pxm-head' });
+    head.createDiv({ cls: 'pxm-title', text: '♫ Music' });
+    // Close the panel; the music keeps driving the brain. The music button (or M)
+    // brings the panel back.
+    const close = head.createEl('button', { cls: 'pxm-x', attr: { 'aria-label': 'Close the music panel (music stays on)' } });
+    close.setText('×');
+    close.addEventListener('click', () => { this.meterHidden = true; m.setCssStyles({ display: 'none' }); });
     const bands: [keyof AudioGains, string, string][] = [
       ['bass', 'Bass', 'Bass: how hard kicks swell and pulse the brain'],
       ['mid', 'Mids', 'Mids: how many coloured signals mids fire (no pulse)'],
@@ -897,7 +1612,20 @@ export class PlexusRenderer {
       refresh();
       m.querySelector<HTMLElement>('.pxm-hint')!.setText(msg || 'Double-click a slider to reset it to 100%.');
     });
+    // Light-show colour: the multicolour default, a single colour, or a rainbow.
+    const crow = m.createDiv({ cls: 'pxm-row', attr: { title: 'Colour of the signals the music fires' } });
+    crow.createSpan({ cls: 'pxm-name', text: 'Color' });
+    const csel = crow.createEl('select', { cls: 'pxm-src pxm-color', attr: { 'aria-label': 'Light show colour' } });
+    for (const [id, label] of this.audioControls?.colorOptions() ?? []) csel.createEl('option', { text: label, value: id });
+    csel.value = this.audioControls?.color() ?? 'default';
+    csel.addEventListener('change', () => this.audioControls?.setColor(csel.value));
     m.createDiv({ cls: 'pxm-hint', text: 'Double-click a slider to reset it to 100%.' });
+  }
+
+  /** The music panel was closed with ×; the music button shows it again. */
+  meterHidden = false;
+  showMeter() {
+    this.meterHidden = false;
   }
 
   /** Lift the agent feed above an overlay docked at the bottom (e.g. the replay bar). */
@@ -1004,6 +1732,13 @@ export class PlexusRenderer {
       links: this.realPairs.length / 2,
       ambient: (this.edgePairs.length - this.realPairs.length) / 2,
       facets: this.triNodes.length / 3,
+      markers: this.markerIdx.length,
+      debug: (() => {
+        let nan = 0;
+        for (let i = 0; i < this.positions.length; i++) if (!Number.isFinite(this.positions[i])) nan++;
+        const r = (v: number) => Math.round(v);
+        return { shape: this.shape, nan, morph: !!this.morph, cam: this.camera.position.toArray().map(r), centroid: this.centroid.toArray().map(r), radius: r(this.radius), bg: this.u.uMycelium.value, fades: { ...this.fades }, heart: Math.round(this.u.uHeart.value * 100) / 100 };
+      })(),
     };
     this.statWindow = { start: now, frames: 0, work: 0, spikes, sparks: this.sparkCount };
   }
@@ -1014,6 +1749,20 @@ export class PlexusRenderer {
   }
 
   private updateCamera(dt: number) {
+    if (this.leader) {
+      const L = this.leader;
+      this.camera.position.copy(L.camera.position);
+      this.camera.quaternion.copy(L.camera.quaternion);
+      this.controls.target.copy(L.controls.target);
+      this.cameraUniforms();
+      return;
+    }
+    if (!this.cine.on && !this.cinemaHeld && this.cinemaIdleSec > 0 && this.settled && this.time - this.lastInput > this.cinemaIdleSec) this.setCinema(true);
+    if (this.cine.on) {
+      this.updateCinema(dt);
+      this.cameraUniforms();
+      return;
+    }
     const target = this.controls.target;
     const k = 1 - Math.exp(-dt * 0.9);
     const following = this.opts.followAI && this.time < this.followUntil;
@@ -1026,8 +1775,11 @@ export class PlexusRenderer {
       const offset = this.tmpVec.copy(this.camera.position).sub(target);
       // Fit to the narrower field of view so tall, narrow panes (portrait monitors)
       // pull back enough to show the whole brain and its agent satellites.
-      const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2);
-      const halfMin = Math.min(halfV, Math.atan(Math.tan(halfV) * this.camera.aspect));
+      // In span mode, fit to the main monitor (this view's slice), not the whole picture.
+      const fov = this.slice ? BASE_FOV : this.camera.fov;
+      const aspect = this.slice ? this.slice.w / this.slice.h : this.camera.aspect;
+      const halfV = THREE.MathUtils.degToRad(fov / 2);
+      const halfMin = Math.min(halfV, Math.atan(Math.tan(halfV) * aspect));
       const fit = Math.max(1.6, (0.8 * 1.3) / Math.tan(halfMin));
       const want = this.radius * fit * (following ? 0.8 : 1);
       offset.setLength(offset.length() + (want - offset.length()) * Math.min(1, k * 2));
@@ -1035,7 +1787,12 @@ export class PlexusRenderer {
     }
     this.controls.autoRotate = this.opts.autoRotate > 0 && this.time > this.resumeRotateAt;
     this.controls.update(dt);
+    this.cameraUniforms();
+  }
 
+  /** Depth of field, fog distance and nebula parallax for the current camera. */
+  private cameraUniforms() {
+    const target = this.controls.target;
     const focus = this.camera.position.distanceTo(target);
     this.u.uFocus.value = focus;
     // Light mode is ink on paper: crisp, so depth-of-field is nearly off.
@@ -1052,16 +1809,35 @@ export class PlexusRenderer {
   private resize() {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
-    const pr = Math.min(window.devicePixelRatio || 1, this.opts.maxPixelRatio);
+    const pr = Math.min((this.container.ownerDocument.defaultView ?? window).devicePixelRatio || 1, this.lowLatency ? 1 : this.opts.maxPixelRatio);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
     this.composer.setPixelRatio(pr);
     this.composer.setSize(w, h);
-    this.camera.aspect = w / h;
+    const s = this.slice;
+    if (s) {
+      // The whole picture keeps the normal field of view on the main monitor and extends
+      // it outward; this view renders its own monitor's part of it.
+      this.camera.aspect = s.fullW / s.fullH;
+      this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(BASE_FOV / 2)) * (s.fullH / s.mainH)));
+      this.camera.setViewOffset(s.fullW, s.fullH, s.x, s.y, s.w, s.h);
+      this.uSpan.value.set((s.x - s.fullW / 2) / s.mainH, -(s.y + s.h - s.fullH / 2) / s.mainH, s.w / s.mainH, s.h / s.mainH);
+      this.uVig.value.set(s.fullW / s.mainH, s.fullH / s.mainH);
+    } else {
+      const asp = w / h;
+      this.camera.aspect = asp;
+      this.camera.fov = BASE_FOV;
+      this.camera.clearViewOffset();
+      this.uSpan.value.set(-asp / 2, -0.5, asp, 1);
+      this.uVig.value.set(asp, 1);
+    }
     this.camera.updateProjectionMatrix();
     const hPx = h * pr;
-    this.u.uPixelScale.value = hPx / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)));
-    this.u.uMaxBlurPx.value = 24 * (hPx / 1080);
+    // Pixels per unit of view angle: the slice covers s.h of the picture's full height.
+    const fullHPx = s ? (hPx * s.fullH) / s.h : hPx;
+    this.u.uPixelScale.value = fullHPx / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)));
+    this.u.uMaxBlurPx.value = this.lowLatency ? 0 : 24 * (hPx / 1080);
+    void w;
     (this.nebula.material as THREE.ShaderMaterial).uniforms.uRes.value.set(w * pr, hPx);
     this.finish.uniforms.uRes.value.set(w * pr, hPx);
   }
@@ -1165,6 +1941,8 @@ export class PlexusRenderer {
     this.edges.frustumCulled = false;
     this.edges.renderOrder = 1;
     this.scene.add(this.edges);
+    this.disposeTendrils();
+    this.syncTendrils();
 
     this.triNodes = this.opts.triangles ? this.findTriangles(pairs) : new Int32Array(0);
     const tg = new THREE.BufferGeometry();
@@ -1173,6 +1951,7 @@ export class PlexusRenderer {
     this.tris = new THREE.Mesh(tg, this.material(GL.COMMON + GL.TRI_VERT, GL.TRI_FRAG));
     (this.tris.material as THREE.Material).side = THREE.DoubleSide;
     this.tris.frustumCulled = false;
+    this.tris.visible = !this.hideFacets; // Mycelium, Lifeblood and Matrix hide the facets
     this.scene.add(this.tris);
 
     this.syncPositions();
@@ -1275,6 +2054,7 @@ export class PlexusRenderer {
   }
 
   private syncPositions() {
+    this.posVersion++;
     const P = this.positions;
     if (this.nodes) (this.nodes.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     if (this.edges) {
@@ -1323,12 +2103,87 @@ export class PlexusRenderer {
   private exportPositions(): LayoutCache {
     const out: LayoutCache = {};
     if (!this.graph) return out;
-    const P = this.positions, r = (v: number) => Math.round(v * 10) / 10;
+    const P = this.base.length === this.positions.length ? this.base : this.positions, r = (v: number) => Math.round(v * 10) / 10;
     this.graph.paths.forEach((p, i) => { out[p] = [r(P[i * 3]), r(P[i * 3 + 1]), r(P[i * 3 + 2])]; });
     return out;
   }
 
+  // ---------------------------------------------------------------- mycelium tendrils
+  // A look only: in the Mycelium theme each link is drawn as two thin wavy threads
+  // instead of a straight line. The threads read the link geometry's own buffers
+  // (instanced, strided), so every pulse, trail and fade still comes from the links.
+
+  private myceliumOn = false;
+  private hideFacets = false;
+  private tendrils: THREE.LineSegments | null = null;
+  private tendrilSync: { src: THREE.BufferAttribute; dst: THREE.InstancedInterleavedBuffer; v: number }[] = [];
+
+  private syncTendrils() {
+    if (this.edges) this.edges.visible = !this.myceliumOn;
+    if (this.tris) this.tris.visible = !this.hideFacets;
+    if (!this.myceliumOn) { this.disposeTendrils(); return; }
+    if (this.tendrils || !this.edges) return;
+    const SEG = 12;
+    const base = new THREE.InstancedBufferGeometry();
+    const n = SEG * 2 * 2; // two strands, line-segment pairs
+    const u = new Float32Array(n), strand = new Float32Array(n);
+    let k = 0;
+    for (let st = 0; st < 2; st++) {
+      for (let i = 0; i < SEG; i++) {
+        u[k] = i / SEG; strand[k++] = st;
+        u[k] = (i + 1) / SEG; strand[k++] = st;
+      }
+    }
+    base.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    base.setAttribute('aU', new THREE.BufferAttribute(u, 1));
+    base.setAttribute('aStrand', new THREE.BufferAttribute(strand, 1));
+    const eg = this.edges.geometry;
+    this.tendrilSync = [];
+    // [instance attribute, edge attribute, floats per edge vertex, offset in floats]
+    const map: [string, string, number, number][] = [
+      ['iA', 'position', 3, 0], ['iB', 'position', 3, 3], ['iSeedA', 'aSeed', 1, 0], ['iSeedB', 'aSeed', 1, 1],
+      ['iKind', 'aKind', 1, 0], ['iPulse', 'aPulse', 3, 0], ['iPulseKind', 'aPulseKind', 1, 0], ['iTrail', 'aTrail', 2, 0],
+      ['iFocusEdge', 'aFocusEdge', 1, 0], ['iBornEdge', 'aBornEdge', 1, 0], ['iSpan', 'aSpan', 1, 0],
+    ];
+    const buffers = new Map<string, THREE.InstancedInterleavedBuffer>();
+    for (const [name, src, size, offset] of map) {
+      const attr = eg.getAttribute(src) as THREE.BufferAttribute;
+      let buf = buffers.get(src);
+      if (!buf) {
+        // One link = two edge vertices, so the stride is two vertices' worth of floats.
+        buf = new THREE.InstancedInterleavedBuffer(attr.array, attr.itemSize * 2, 1);
+        buffers.set(src, buf);
+        this.tendrilSync.push({ src: attr, dst: buf, v: attr.version });
+      }
+      base.setAttribute(name, new THREE.InterleavedBufferAttribute(buf, size, offset));
+    }
+    base.instanceCount = this.edgePairs.length / 2;
+    this.tendrils = new THREE.LineSegments(base, this.material(GL.COMMON + GL.COLORS + GL.TENDRIL_VERT, GL.COLORS + GL.EDGE_FRAG));
+    this.tendrils.frustumCulled = false;
+    this.tendrils.renderOrder = 1;
+    this.scene.add(this.tendrils);
+  }
+
+  /** The link buffers changed (positions, pulses, trails, focus): re-upload the shared arrays. */
+  private updateTendrils() {
+    for (const s of this.tendrilSync) {
+      if (s.src.version !== s.v) { s.v = s.src.version; s.dst.needsUpdate = true; }
+    }
+  }
+
+  private disposeTendrils() {
+    if (!this.tendrils) return;
+    this.scene.remove(this.tendrils);
+    this.tendrils.geometry.dispose();
+    (this.tendrils.material as THREE.Material).dispose();
+    this.tendrils = null;
+    this.tendrilSync = [];
+  }
+
   private disposeGraph() {
+    this.fadeLayer?.remove();
+    this.fadeLayer = null;
+    this.disposeTendrils();
     for (const obj of [this.nodes, this.edges, this.tris]) {
       if (!obj) continue;
       this.scene.remove(obj);

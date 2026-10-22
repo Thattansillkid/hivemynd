@@ -9,7 +9,7 @@ export class HoverCard {
   private shown = -1;
   private token = 0;
 
-  constructor(parent: HTMLElement, private app: App, private log: () => AccessLog, private linkCounts: (path: string) => { out: number; in: number }, private agentColor: (a: string) => string) {
+  constructor(parent: HTMLElement, private app: App, private log: () => AccessLog, private linkCounts: (path: string) => { out: number; in: number }, private agentColor: (a: string) => string, private info?: (path: string) => Promise<string | null>) {
     this.el = parent.createDiv({ cls: 'plexus-card' });
     this.el.setCssStyles({ display: 'none' });
   }
@@ -54,6 +54,9 @@ export class HoverCard {
       .replace(/^---\s*/, '')
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, '$2').replace(/https?:\/\/\S+/g, '').replace(/[#>*_`[\]]+/g, '').replace(/\s+/g, ' ').trim();
     excerpt.setText(body ? body.slice(0, 220) + (body.length > 220 ? '…' : '') : '(empty note)');
+    // Extra line from the plugin: who wrote the note (human vs agents) and its trust.
+    const extra = await this.info?.(path);
+    if (extra && my === this.token) this.el.createDiv({ cls: 'plexus-card-folder plexus-card-badge', text: extra });
   }
 }
 

@@ -1,4 +1,5 @@
 import { Menu, setIcon } from 'obsidian';
+import { showMenu } from './menus';
 
 // Modular Brain Monitor: every overview card is a panel on a snap grid. Drag a panel
 // by its header to move it (the others flow out of the way and float back up), drag
@@ -106,7 +107,7 @@ export class Dashboard {
       this.grid.toggleClass('is-locked', this.locked);
     }));
     m.addItem((i) => i.setTitle('Reset layout').setIcon('rotate-ccw').onClick(() => this.reset()));
-    m.showAtMouseEvent(e);
+    showMenu(m, { x: e.clientX, y: e.clientY }, (e.target as Node | null)?.ownerDocument ?? document);
   }
 
   private narrow() { return this.grid.clientWidth < NARROW_PX; }

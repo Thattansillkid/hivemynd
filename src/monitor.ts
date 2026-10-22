@@ -12,6 +12,9 @@ export interface BrainStats {
   links: number;
   ambient: number;
   facets: number;
+  /** Claim rings and gap outlines currently shown. */
+  markers?: number;
+  debug?: unknown;
 }
 
 export interface Sample {
