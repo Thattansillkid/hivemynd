@@ -25,6 +25,7 @@ import { AudioReactor, SYSTEM_AUDIO } from './audio';
 import { Credential, CredentialMeta, Scope, canAssertAgent, denyListFor, gate, hasScope, isDenied, newCredential, newKey } from './server/auth';
 import { sendError, sendJson, sendStatus } from './server/http';
 import { nodeDeps, removeSecretFile, vaultKeyDir, writeSecretFile } from './server/keyfile';
+import { PathRules, resolvesInside, vaultRelative } from './server/pathguard';
 
 
 export interface BridgeMessage {
@@ -2113,20 +2114,34 @@ export default class PlexusPlugin extends Plugin {
 
   // ------------------------------------------------------------ write diff & undo
 
-  /** Vault-relative .md paths named in write-tool texts (absolute paths outside the vault are ignored). */
+  /** Vault-relative .md paths named in write-tool texts; anything that is not one is dropped (see pathguard.ts). */
   private writePaths(texts: string[]): string[] {
-    const adapter = this.app.vault.adapter;
-    const base = (adapter instanceof FileSystemAdapter ? adapter.getBasePath() : '').replace(/\\/g, '/').replace(/\/+$/, '');
+    const rules = this.pathRules();
     const out = new Set<string>();
     for (const raw of texts) {
-      const t = raw.trim().replace(/\\/g, '/');
-      if (!/\.md$/i.test(t)) continue;
-      let rel: string | null = null;
-      if (base && t.toLowerCase().startsWith(base.toLowerCase() + '/')) rel = t.slice(base.length + 1);
-      else if (!/^[a-z]:\//i.test(t) && !t.startsWith('/')) rel = t;
-      if (rel && !rel.startsWith(`${this.app.vault.configDir}/`)) out.add(normalizePath(rel));
+      const rel = vaultRelative(raw, rules);
+      if (rel) out.add(normalizePath(rel));
     }
     return [...out];
+  }
+
+  private pathRules(): PathRules {
+    const adapter = this.app.vault.adapter;
+    return { base: adapter instanceof FileSystemAdapter ? adapter.getBasePath() : '', configDir: this.app.vault.configDir };
+  }
+
+  /**
+   * Whether H!V3MYND may read a note named by an agent event: a plain vault path to a
+   * Markdown file that, with links and junctions followed, is inside the vault. On
+   * mobile (no file system access) only notes in Obsidian's own index qualify.
+   */
+  private async readableNote(path: string): Promise<boolean> {
+    const rules = this.pathRules();
+    const rel = vaultRelative(path, rules);
+    if (!rel || normalizePath(rel) !== normalizePath(path)) return false;
+    const d = nodeDeps();
+    if (d && rules.base) return resolvesInside(d.fs, rules.base, path, d.platform);
+    return this.app.vault.getAbstractFileByPath(path) instanceof TFile;
   }
 
   private async snapshotBefore(data: any, agent: string): Promise<string[]> {
@@ -2138,8 +2153,9 @@ export default class PlexusPlugin extends Plugin {
       const paths = new Set([...graph.resolver.resolve(texts).map((i) => graph.paths[i]), ...this.writePaths(texts)]);
       for (const p of paths) {
         all.add(p);
-        const exists = await this.app.vault.adapter.exists(p);
-        this.pendingBefore.set(p, { text: exists ? await this.app.vault.adapter.read(p) : null, t: Date.now() });
+        // A path that doesn't qualify is treated as a new note: nothing is read.
+        const ok = await this.readableNote(p);
+        this.pendingBefore.set(p, { text: ok ? await this.app.vault.adapter.read(p) : null, t: Date.now() });
       }
     }
     return [...all];
@@ -2154,8 +2170,7 @@ export default class PlexusPlugin extends Plugin {
       this.pendingBefore.delete(path);
     }
     if (before === undefined) return; // no pre-image: can't offer a diff or undo
-    const exists = await this.app.vault.adapter.exists(path);
-    const after = exists ? await this.app.vault.adapter.read(path) : null;
+    const after = (await this.readableNote(path)) ? await this.app.vault.adapter.read(path) : null;
     if (before === after) return;
     const masked = after !== null && this.settings.autoMaskSecrets && this.settings.secretScan !== 'off' ? newSecrets(before, after) : [];
     await this.changes.add({
@@ -2196,6 +2211,8 @@ export default class PlexusPlugin extends Plugin {
   }
 
   private confirmRestore(c: ChangeRecord) {
+    const rel = vaultRelative(c.path, this.pathRules());
+    if (!rel || normalizePath(rel) !== normalizePath(c.path)) { new Notice('H!V3MYND: this change names a path outside the vault and can’t be restored.'); return; }
     if (c.stored === 'metadata') { new Notice('H!V3MYND: this change was recorded without its text (history: metadata only), so it can’t be undone.'); return; }
     new RestoreModal(this.app, c, async () => {
       const adapter = this.app.vault.adapter;

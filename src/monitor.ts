@@ -1,3 +1,4 @@
+import { nodeDeps } from './server/keyfile';
 import { nvidiaSmiPath } from './trustedexec';
 
 // Samples system and brain health once a second for the Brain Monitor window.
@@ -80,9 +81,8 @@ export class Monitor {
     const cp = (window as any).require?.('child_process');
     if (!cp) { this.gpuStatus = 'unavailable'; return; }
     try {
-      const fs = (window as any).require('fs');
-      const proc = (window as any).require('process');
-      const exe = nvidiaSmiPath(proc.platform, proc.env, (p) => fs.existsSync(p));
+      const d = nodeDeps();
+      const exe = d && nvidiaSmiPath(d.platform, d.env, (p) => d.fs.existsSync(p));
       if (!exe) { this.gpuStatus = 'unavailable'; return; }
       const smi = cp.spawn(exe, [
         '--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,name',
