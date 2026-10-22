@@ -6,7 +6,7 @@ import { AccessAction, AccessEntry, AccessLog, dayKey, noteTitle } from './acces
 import { buildReport } from './report';
 import { buildPack, Pack } from './contextpack';
 import { Collision, detectCollision, isSynthetic, foldHistory, heatAndDecay, linkSuggestions, parseWatchlist, rereads, taskGroups, tokensForBytes, watchMatch } from './insights';
-import { ChangeRecord, ChangeStore } from './changes';
+import { ChangeRecord, ChangeStore, HistoryMode } from './changes';
 import { BrainSearch } from './brainsearch';
 import { HoverCard } from './hovercard';
 import { GrowthBar } from './growth';
@@ -17,7 +17,7 @@ import { WebViewer } from './webviewer';
 import { meaningLinks } from './semantic';
 import { ReplayBar } from './replay';
 import { Claim, ClaimBoard, Gap, Handoff, Trust, buildBrief, buildHandoffPack, detectHandoff, gapRadar, gapStub, trustScore } from './team';
-import { AgentTask, Authorship, TaskBoard, authorship, findSecrets, maskSecrets, newSecrets } from './extras';
+import { AgentTask, Authorship, TaskBoard, authorship, findSecrets, keptPurpose, maskSecrets, newSecrets } from './extras';
 import { THEMES, chromeAccent, themeById } from './themes';
 import { addGroup, showMenu } from './menus';
 import { SHAPES, shapeById } from './shapes';
@@ -149,6 +149,12 @@ interface PlexusSettings extends PlexusOptions {
   defaultPcControl: PcMode;
   /** Keep what each agent was asked to do (its prompt) in the access log. */
   storePurposes: boolean;
+  /** What change history keeps of each agent write (see HistoryMode). */
+  historyMode: HistoryMode;
+  /** Days of change history and bridge messages to keep (0 = forever). */
+  historyDays: number;
+  /** Bridge messages on disk: full text (secrets masked) or sender/recipient/time only. */
+  bridgeMessageStore: 'full' | 'metadata';
   /** Extra listener endpoints for tooling and debugging (view remote control, audio probes, reload). */
   developerMode: boolean;
   /** The first-run welcome has been shown. */
@@ -264,6 +270,9 @@ const DEFAULT_SETTINGS: PlexusSettings = {
   enforcePermissions: true,
   defaultPcControl: 'ask',
   storePurposes: true,
+  historyMode: 'redacted',
+  historyDays: 30,
+  bridgeMessageStore: 'full',
   developerMode: false,
   welcomed: false,
   policyFile: '',
@@ -358,6 +367,8 @@ export default class PlexusPlugin extends Plugin {
     this.log = new AccessLog(this.app.vault.adapter, `${this.manifest.dir}/access-log`, () => ({ enabled: this.settings.digest, folder: this.settings.digestFolder }));
     await this.log.load();
     this.changes = new ChangeStore(this.app.vault.adapter, `${this.manifest.dir}/changes`);
+    this.changes.mode = this.settings.historyMode;
+    await this.changes.prune(this.settings.historyDays);
     await this.changes.load();
     await this.loadBridgeMessages();
     await this.loadMisses();
@@ -1641,7 +1652,7 @@ export default class PlexusPlugin extends Plugin {
         const minutes = Math.max(1, Math.min(480, Number(body?.minutes) || this.settings.claimMinutes));
         const claimed: Claim[] = [], conflicts: (Claim & { handoff: string })[] = [];
         for (const p of paths) {
-          const r = this.claims.claim(agent, normalizePath(p), String(body?.purpose ?? '').slice(0, 200), minutes, true);
+          const r = this.claims.claim(agent, normalizePath(p), keptPurpose(body?.purpose, this.settings.storePurposes), minutes, true);
           if ('claim' in r) claimed.push(r.claim);
           else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
         }
@@ -1827,7 +1838,7 @@ export default class PlexusPlugin extends Plugin {
     if (!notes.length) return;
     if (kind === 'scan' && !this.settings.logSearches) return;
     const now = Date.now();
-    let purpose = typeof ev.purpose === 'string' && this.settings.storePurposes ? ev.purpose.trim().slice(0, 200) : '';
+    let purpose = keptPurpose(ev.purpose, this.settings.storePurposes);
     if (!purpose && this.settings.storePurposes) {
       const p = (ev.session && this.purposes.get(`${agent}:${ev.session}`)) || this.purposes.get(`${agent}:*`);
       if (p && now - p.at < PURPOSE_TTL) purpose = p.text;
@@ -2002,6 +2013,8 @@ export default class PlexusPlugin extends Plugin {
   private purposeFile() { return `${this.manifest.dir}/purposes.json`; }
 
   private async loadPurposes() {
+    // Prompt storage off: anything remembered from before it was turned off goes too.
+    if (!this.settings.storePurposes) { await this.forgetPurposes(); return; }
     try {
       if (!(await this.app.vault.adapter.exists(this.purposeFile()))) return;
       const saved = JSON.parse(await this.app.vault.adapter.read(this.purposeFile())) as [string, { text: string; at: number }][];
@@ -2013,6 +2026,20 @@ export default class PlexusPlugin extends Plugin {
     const keep = [...this.purposes].filter(([, v]) => Date.now() - v.at < PURPOSE_TTL).slice(-200);
     void this.app.vault.adapter.write(this.purposeFile(), JSON.stringify(keep));
   }, 2000, false);
+
+  /** Clears remembered prompts from memory and disk (when "Store agent prompts" is turned off). */
+  async forgetPurposes() {
+    this.purposes.clear();
+    try { if (await this.app.vault.adapter.exists(this.purposeFile())) await this.app.vault.adapter.remove(this.purposeFile()); } catch { /* gone */ }
+  }
+
+  /** Deletes change history, bridge messages and remembered prompts. */
+  async purgeHistory() {
+    await this.changes.purge();
+    await this.forgetPurposes();
+    this.bridgeMessages.length = 0;
+    try { if (await this.app.vault.adapter.exists(this.bridgeFile())) await this.app.vault.adapter.remove(this.bridgeFile()); } catch { /* gone */ }
+  }
 
   private missFile() { return `${this.manifest.dir}/search-misses.jsonl`; }
 
@@ -2136,8 +2163,8 @@ export default class PlexusPlugin extends Plugin {
       t: Date.now(),
       agent,
       path,
-      purpose: typeof ev.purpose === 'string' ? ev.purpose : '',
-      source: typeof ev.source === 'string' ? ev.source : '',
+      purpose: keptPurpose(ev.purpose, this.settings.storePurposes),
+      source: typeof ev.source === 'string' ? ev.source.slice(0, 80) : '',
       before,
       after,
     });
@@ -2151,18 +2178,25 @@ export default class PlexusPlugin extends Plugin {
     const clean = maskSecrets(text);
     if (clean === text) return;
     await this.app.vault.modify(f, clean);
-    await this.changes.add({
-      id: `${Date.now().toString(36)}-mask`, t: Date.now(), agent: 'H!V3MYND', path,
-      purpose: `Masked ${kinds.length} secret${kinds.length === 1 ? '' : 's'} ${agent} wrote (${[...new Set(kinds)].join(', ')})`,
-      source: 'H!V3MYND secret scanner', before: text, after: clean,
-    });
-    new Notice(`H!V3MYND masked ${kinds.length === 1 ? 'a' : kinds.length} ${[...new Set(kinds)].join(', ')} that ${agent} wrote into “${noteTitle(path)}”. Undo it in Brain Monitor → Changes if it was meant to be there.`, 12_000);
+    // Only raw history may keep the unmasked text as this change's undo; otherwise the
+    // secret is gone once masked (the agent's own change record was redacted too).
+    const undoable = this.settings.historyMode === 'raw';
+    if (undoable) {
+      await this.changes.add({
+        id: `${Date.now().toString(36)}-mask`, t: Date.now(), agent: 'H!V3MYND', path,
+        purpose: `Masked ${kinds.length} secret${kinds.length === 1 ? '' : 's'} ${agent} wrote (${[...new Set(kinds)].join(', ')})`,
+        source: 'H!V3MYND secret scanner', before: text, after: clean,
+      });
+    }
+    new Notice(`H!V3MYND masked ${kinds.length === 1 ? 'a' : kinds.length} ${[...new Set(kinds)].join(', ')} that ${agent} wrote into “${noteTitle(path)}”. ` +
+      (undoable ? 'Undo it in Brain Monitor → Changes if it was meant to be there.' : 'The original value was not kept; if it was meant to be there, add it again yourself.'), 12_000);
     const col: Collision = { t: Date.now(), kind: 'watch', note: path, writer: agent, other: 'secret scanner', otherAt: Date.now(), action: 'write', rule: 'secret' };
     this.alerts.push(col);
     for (const fn of this.alertListeners) fn(col);
   }
 
   private confirmRestore(c: ChangeRecord) {
+    if (c.stored === 'metadata') { new Notice('H!V3MYND: this change was recorded without its text (history: metadata only), so it can’t be undone.'); return; }
     new RestoreModal(this.app, c, async () => {
       const adapter = this.app.vault.adapter;
       const current = (await adapter.exists(c.path)) ? await adapter.read(c.path) : null;
@@ -2226,7 +2260,9 @@ export default class PlexusPlugin extends Plugin {
     };
     this.bridgeMessages.push(m);
     this.bridgeMessages.sort((a, b) => a.t - b.t);
-    void this.app.vault.adapter.append(this.bridgeFile(), JSON.stringify(m) + '\n');
+    // Metadata mode keeps who, to whom and when on disk; the text stays in memory only.
+    const kept = this.settings.bridgeMessageStore === 'metadata' ? { ...m, body: '' } : m;
+    void this.app.vault.adapter.append(this.bridgeFile(), JSON.stringify(kept) + '\n');
     // Only animate fresh traffic, not a history backfill.
     if (Date.now() - t < 60_000 && !this.replaying) {
       for (const v of this.views()) v.renderer?.message(this.alias(m.sender), m.recipient === 'all' ? 'all' : this.alias(m.recipient));
@@ -2569,6 +2605,27 @@ class ApprovalModal extends Modal {
   onClose() {
     if (this.timer !== null) window.clearInterval(this.timer);
     if (!this.done) { this.done = true; this.decide('deny'); }
+    this.contentEl.empty();
+  }
+}
+
+/** A yes/no question for actions that can't be undone. */
+class ConfirmModal extends Modal {
+  constructor(app: App, private heading: string, private text: string, private yes: string, private onConfirm: () => Promise<void>) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: this.heading });
+    contentEl.createEl('p', { text: this.text });
+    const row = contentEl.createDiv({ cls: 'modal-button-container' });
+    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    const ok = row.createEl('button', { cls: 'mod-warning', text: this.yes });
+    ok.addEventListener('click', async () => { ok.disabled = true; await this.onConfirm(); this.close(); });
+  }
+
+  onClose() {
     this.contentEl.empty();
   }
 }
@@ -3363,7 +3420,25 @@ class PlexusSettingTab extends PluginSettingTab {
       t.setValue(s.exclude).onChange(debounce((v: string) => { s.exclude = v; save(); this.plugin.refreshGraph(true); }, 800, true)));
 
     new Setting(containerEl).setName('Access log').setHeading();
-    toggle('Store agent prompts', 'Keep what each agent was asked to do (its prompt, first line) with every access, for the Tasks tab, reports and context budget. Off: accesses are logged without it.', 'storePurposes');
+    toggle('Store agent prompts', 'Keep what each agent was asked to do (its prompt, first line) with every access and change, for the Tasks tab, reports and context budget. Off: nothing an agent was asked is kept anywhere, and remembered prompts are cleared.', 'storePurposes', () => { if (!s.storePurposes) void this.plugin.forgetPurposes(); });
+    new Setting(containerEl).setName('Change history').setDesc('What H!V3MYND keeps of each agent write, for Brain Monitor → Changes and undo. Redacted: note text with keys and tokens masked before saving; undo restores the masked text. Raw: exact text including any secrets, so undo is exact. Metadata: who, when, which note and line counts only; no diff, no undo.')
+      .addDropdown((d) => d.addOptions({ redacted: 'Redacted (recommended)', raw: 'Raw (keeps secrets)', metadata: 'Metadata only' }).setValue(s.historyMode).onChange((v) => {
+        s.historyMode = v as HistoryMode;
+        this.plugin.changes.mode = s.historyMode;
+        save();
+        if (v === 'raw') new Notice('H!V3MYND: raw history keeps note text exactly, including any keys or passwords an agent writes, in the plugin folder.', 10_000);
+      }));
+    new Setting(containerEl).setName('Bridge messages on disk').setDesc('Full: message text is saved (keys and tokens masked). Metadata: only sender, recipient and time are saved; text is shown while Obsidian is open.')
+      .addDropdown((d) => d.addOptions({ full: 'Full text', metadata: 'Metadata only' }).setValue(s.bridgeMessageStore).onChange((v) => { s.bridgeMessageStore = v as 'full' | 'metadata'; save(); }));
+    new Setting(containerEl).setName('Keep history for (days)').setDesc('Change history and bridge messages older than this are deleted when Obsidian starts. 0 keeps everything.').addText((t) =>
+      t.setValue(String(s.historyDays)).onChange(debounce((v: string) => { const n = Number(v); if (Number.isInteger(n) && n >= 0) { s.historyDays = n; save(); } }, 800, true)));
+    new Setting(containerEl).setName('Delete stored history').setDesc('Deletes change history (all diffs and undo points), bridge messages and remembered prompts from the plugin folder. The access log is kept.')
+      .addButton((b) => b.setButtonText('Delete…').setWarning().onClick(() => {
+        new ConfirmModal(this.app, 'Delete stored history?', 'All change history (diffs and undo points), bridge messages and remembered prompts will be deleted. This can’t be undone.', 'Delete', async () => {
+          await this.plugin.purgeHistory();
+          new Notice('H!V3MYND: stored history deleted.');
+        }).open();
+      }));
     toggle('Log searches', 'Record notes that surfaced in agent searches (one line per search), not just reads and writes.', 'logSearches');
     toggle('Daily digest notes', 'Also write a readable table per day into the vault. The folder is kept out of the brain.', 'digest', () => this.plugin.refreshGraph(true));
     toggle('Daily brain report', "Summarise each day's agent activity in one note (Reports subfolder of the digest folder): who did what, most-used notes, alerts, re-reads and searches that found nothing. Written the next day, or any time with the command.", 'dailyReport', () => this.plugin.refreshGraph(true));

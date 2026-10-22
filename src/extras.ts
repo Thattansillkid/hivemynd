@@ -57,6 +57,16 @@ export function maskSecrets(text: string, hits = findSecrets(text)) {
   return out + text.slice(at);
 }
 
+/**
+ * The purpose (what an agent was asked) as it may be kept: nothing at all when prompt
+ * storage is off, otherwise one trimmed line with keys and tokens masked. Every store
+ * that keeps a purpose goes through this.
+ */
+export function keptPurpose(purpose: unknown, store: boolean): string {
+  if (!store || typeof purpose !== 'string') return '';
+  return maskSecrets(purpose.trim().slice(0, 200));
+}
+
 /** Secrets in `after` that weren't already in `before` (so old notes aren't re-flagged). */
 export function newSecrets(before: string | null, after: string): SecretHit[] {
   const old = new Set(findSecrets(before ?? '').map((h) => (before ?? '').slice(h.start, h.end)));

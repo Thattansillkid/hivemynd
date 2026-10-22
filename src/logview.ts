@@ -767,10 +767,17 @@ export class AccessLogView extends ItemView {
     const actions = head.createDiv({ cls: 'pm-diff-actions' });
     const open = actions.createEl('button', { cls: 'plexus-log-chip', text: 'Open note' });
     open.addEventListener('click', () => this.host.openNote(r.path, r.agent));
+    const body = this.diffEl.createDiv({ cls: 'pm-diff-body' });
+    if (r.stored === 'metadata') {
+      // Saved without its text (Settings → Change history: metadata only): nothing to show or undo.
+      const { added, removed } = diffStats(r);
+      body.createDiv({ cls: 'pm-empty', text: `+${added} −${removed} lines. The text of this change wasn't kept (change history is set to metadata only), so there's no diff or undo.` });
+      return;
+    }
     const undo = actions.createEl('button', { cls: 'pm-undo', text: r.before === null ? 'Undo (move to trash)' : 'Restore before this change' });
     undo.addEventListener('click', () => this.host.restore(r));
+    if (r.stored === 'redacted') title.createDiv({ cls: 'plexus-log-note-folder', text: 'Keys and tokens in this change were masked before it was saved; undo restores the masked text.' });
 
-    const body = this.diffEl.createDiv({ cls: 'pm-diff-body' });
     const before = r.before ?? '';
     const after = r.after ?? '';
     const ops = diffLines(before, after);

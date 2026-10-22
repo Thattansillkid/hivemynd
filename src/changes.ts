@@ -1,5 +1,6 @@
 import type { DataAdapter } from 'obsidian';
 import { dayKey } from './accesslog';
+import { maskSecrets } from './extras';
 
 // Before/after snapshots of every agent write, so each change can be diffed and
 // undone. One JSONL file per day in the plugin folder (outside the vault graph).
@@ -14,7 +15,34 @@ export interface ChangeRecord {
   before: string | null; // null: the write created the note
   after: string | null; // null: the note was gone afterwards
   restoreOf?: string; // set when this record is an undo of another change
+  /** How the note text was kept (absent in records from 1.1: raw). */
+  stored?: HistoryMode;
+  /** Line counts, kept when the text itself isn't (metadata mode). */
+  lines?: { added: number; removed: number };
 }
+
+/**
+ * What change history keeps of each write:
+ *   raw       the note text exactly, so undo restores it exactly (secrets included)
+ *   redacted  the note text with keys and tokens masked before it is saved; undo
+ *             restores the masked text (the default)
+ *   metadata  who, when, which note and how many lines; no text, no undo
+ */
+export type HistoryMode = 'raw' | 'redacted' | 'metadata';
+
+/** A change record as `mode` allows it to be saved. Runs before anything reaches disk. */
+export function forHistory(c: ChangeRecord, mode: HistoryMode): ChangeRecord {
+  if (mode === 'raw') return { ...c, stored: 'raw' };
+  if (mode === 'redacted') {
+    const mask = (t: string | null) => (t === null ? null : maskSecrets(t));
+    return { ...c, before: mask(c.before), after: mask(c.after), stored: 'redacted' };
+  }
+  // '' (not null) keeps "created" and "deleted" distinguishable without keeping text.
+  return { ...c, lines: diffStats(c), before: c.before === null ? null : '', after: c.after === null ? null : '', stored: 'metadata' };
+}
+
+/** Day files are named YYYY-MM-DD.jsonl; nothing else in the folder is ever read. */
+export const DAY_FILE = /(^|\/)\d{4}-\d{2}-\d{2}\.jsonl$/;
 
 const MEMORY_LIMIT = 300;
 
@@ -28,7 +56,7 @@ export class ChangeStore {
     try {
       if (!(await this.adapter.exists(this.dir))) await this.adapter.mkdir(this.dir);
       const { files } = await this.adapter.list(this.dir);
-      const recent = files.filter((f) => f.endsWith('.jsonl')).sort().slice(-3);
+      const recent = files.filter((f) => DAY_FILE.test(f)).sort().slice(-3);
       // Only the newest records are kept in memory, so read just the end of each file.
       // (A busy day's file can be tens of megabytes; reading it whole on every load
       // crashed Obsidian's window after a few plugin reloads.)
@@ -61,7 +89,7 @@ export class ChangeStore {
     };
     try {
       const { files } = await this.adapter.list(this.dir);
-      for (const f of files.filter((x) => x.endsWith('.jsonl'))) await this.eachLine(f, (line) => { try { add(JSON.parse(line)); } catch { /* torn line */ } });
+      for (const f of files.filter((x) => DAY_FILE.test(x))) await this.eachLine(f, (line) => { try { add(JSON.parse(line)); } catch { /* torn line */ } });
     } catch { /* no history yet */ }
     this.onChange(add);
     return out;
@@ -115,15 +143,47 @@ export class ChangeStore {
     return () => this.listeners.delete(fn);
   }
 
-  async add(c: ChangeRecord) {
+  /** How new records are kept; see HistoryMode. */
+  mode: HistoryMode = 'redacted';
+
+  /** Saves a change as the history mode allows. Resolves false if it couldn't be written. */
+  async add(raw: ChangeRecord): Promise<boolean> {
+    const c = forHistory(raw, this.mode);
     this.records.push(c);
     if (this.records.length > MEMORY_LIMIT) this.records.shift();
+    let ok = true;
     try {
       await this.adapter.append(`${this.dir}/${dayKey(new Date(c.t))}.jsonl`, JSON.stringify(c) + '\n');
     } catch (err) {
+      ok = false;
       console.warn('H!V3MYND: could not save change', err);
     }
     for (const fn of this.listeners) fn(c);
+    return ok;
+  }
+
+  /** Deletes day files older than `days` days. Returns how many were removed. */
+  async prune(days: number, now = Date.now()): Promise<number> {
+    if (!(days > 0)) return 0;
+    const cutoff = dayKey(new Date(now - days * 86_400_000));
+    let n = 0;
+    try {
+      const { files } = await this.adapter.list(this.dir);
+      for (const f of files) {
+        const day = /(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(f)?.[1];
+        if (day && DAY_FILE.test(f) && day < cutoff) { await this.adapter.remove(f); n++; }
+      }
+    } catch (err) {
+      console.warn('H!V3MYND: could not prune change history', err);
+    }
+    return n;
+  }
+
+  /** Deletes all change history, on disk and in memory. */
+  async purge() {
+    this.records.length = 0;
+    const { files } = await this.adapter.list(this.dir);
+    for (const f of files.filter((x) => DAY_FILE.test(x))) await this.adapter.remove(f);
   }
 }
 
@@ -176,6 +236,7 @@ function coarse(a: string[], b: string[]): DiffOp[] {
 }
 
 export function diffStats(c: ChangeRecord) {
+  if (c.lines) return c.lines;
   if (c.before === null && c.after !== null) return { added: c.after.split('\n').length, removed: 0 };
   if (c.after === null && c.before !== null) return { added: 0, removed: c.before.split('\n').length };
   if (c.before === null || c.after === null) return { added: 0, removed: 0 };

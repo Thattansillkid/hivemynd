@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "lib": ["DOM", "ES2022"], "target": "ES2022" },
-  "include": ["src/server", "test", "vitest.config.mts"]
+  "include": ["src/server", "src/changes.ts", "src/extras.ts", "src/trustedexec.ts", "test", "vitest.config.mts"]
 }
