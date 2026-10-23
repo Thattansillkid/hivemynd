@@ -1,5 +1,9 @@
 # Build and publish a release when a version tag (e.g. 1.0.1) is pushed.
 # Actions are pinned to commit SHAs (supply-chain hardening).
+#
+# Two jobs, so dependency code never runs with write access: "build" installs, audits,
+# tests and builds with a read-only token; "publish" runs no npm code at all and only
+# attests and releases the files "build" produced.
 name: Release
 
 on:
@@ -7,16 +11,17 @@ on:
     tags:
       - "*"
 
-permissions:
-  contents: write      # create the release
-  id-token: write      # sign build provenance
-  attestations: write  # publish the attestation
+permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -27,6 +32,27 @@ jobs:
       - run: npm run build
       - name: Tag must match manifest version
         run: test "$(node -p "require('./manifest.json').version")" = "${GITHUB_REF_NAME}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            main.js
+            manifest.json
+            styles.css
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign build provenance
+      attestations: write  # publish the attestation
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
       # Lets anyone verify main.js and styles.css were built from this repository:
       #   gh attestation verify main.js --repo Thattansillkid/hivemynd
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

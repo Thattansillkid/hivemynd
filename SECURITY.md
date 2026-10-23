@@ -22,7 +22,7 @@ Please use GitHub's **private vulnerability reporting** on this repository ("Sec
    | Bridge | Agent + naming the agent per request, approvals, policy blocks, bridge messages | The Agent Bridge, which authenticates its own agents |
    | Admin | Everything, including Developer mode tooling | Development only |
 
-   The agent a request acts as comes from its key. An agent key that names a different agent (`/hook/<other>`, `?agent=`, `"agent"` in the body) is refused with `403`, and events sent with it are always recorded as its own agent. An agent without its own permission rule gets the union of every agent's hidden folders, never an empty list.
+   The agent a request acts as comes from its key. An agent key that names a different agent (`/hook/<other>`, `?agent=`, `"agent"` in the body) is refused with `403`, and events sent with it are always recorded as its own agent. An agent without its own permission rule gets the union of every agent's hidden folders, never an empty list. Notes in an agent's hidden folders are also left out of every team answer that key gets (claims, handoffs and handoff packs, tasks, gaps, trust, authorship, the HUD), and a hidden note answers like one that doesn't exist. Only Bridge and Admin keys may send a note's previous text with a write event (used for undo); from other keys it is dropped.
 3. **Agents.** Treat every agent as able to be manipulated: a prompt-injected agent will do what the injected text says. A leaked key grants exactly that key's scope. Give each agent its own key.
 4. **Bridge (optional, `bridge/`).** Vault-only routes. It never runs commands, opens apps or reads files outside the vault. `.obsidian/`, `.trash/` and `.git/` are always refused (plugin code lives in `.obsidian`). Tokens are random, shown once, and stored only as SHA-256 hashes. Binds `127.0.0.1` by default. Its H!V3MYND key has Bridge scope, so the bridge is trusted to name its agents correctly.
 5. **Web viewer (off by default).** Its own key, separate from the listener keys; read-only; no note contents; single-use tickets for the live stream; strict Content-Security-Policy; local-network access is a second opt-in. Over the local network it is plain HTTP: only turn that on for a network you trust.
@@ -30,7 +30,7 @@ Please use GitHub's **private vulnerability reporting** on this repository ("Sec
 
 ## Paths in agent events
 
-Paths named in hook payloads and pulses are reports, not trusted input. Before H!V3MYND snapshots or reads a note named in one, the path must be a plain vault-relative Markdown path (no `..`, absolute paths only inside the vault, no drive-relative, UNC or device paths, no NTFS streams, not the configuration folder), and the real file, with links and junctions followed, must be inside the vault. Anything else is treated as a new note and nothing is read. A folder linked into the vault from elsewhere is therefore not captured in change history.
+Paths named in hook payloads and pulses are reports, not trusted input. Before H!V3MYND snapshots or reads a note named in one, the path must be a plain vault-relative Markdown path (no `..`, absolute paths only inside the vault, no drive-relative, UNC or device paths, no NTFS streams, not the configuration folder), and the real file, with links, junctions and Windows short names (such as `OBSIDI~1`) resolved, must be inside the vault and outside its configuration folder. Restore applies the same check. Anything else is treated as a new note and nothing is read. A folder linked into the vault from elsewhere is therefore not captured in change history.
 
 ## What is advisory, not enforced
 
@@ -45,7 +45,7 @@ Everything lives in the plugin folder (`.obsidian/plugins/hivemynd/`) unless not
 | Data | Contents | Control |
 |---|---|---|
 | Change history (`changes/`) | Before/after of agent writes | **Redacted** by default (keys and tokens masked before saving; undo restores the masked text). **Raw** keeps exact text including secrets. **Metadata** keeps who/when/which note/line counts only. Deleted after the retention period (default 30 days). |
-| Bridge messages (`bridge/`) | Messages relayed by the bridge, secrets masked | Full or metadata only; same retention |
+| Bridge messages (`bridge/`) | Messages relayed by the bridge, secrets masked | Full or metadata only; same retention (no message is dated before 2000, so none escapes it) |
 | Access log | Which agent touched which note; optionally what it was asked | "Store agent prompts" off keeps no prompts anywhere (access log, change history, claims) and deletes remembered ones |
 | Remembered prompts (`purposes.json`) | Latest prompt per agent, for a short time | As above |
 | SecretStorage | Listener keys, viewer key, alert URL | Never in `data.json` |
@@ -57,6 +57,10 @@ Everything lives in the plugin folder (`.obsidian/plugins/hivemynd/`) unless not
 ## Limits
 
 Request bodies are capped per route (20 KB to 1 MB), at most 500 events or 100 bridge messages per request, 50 requests a second per key with bursts of 300 (`429`), and 24 requests in progress plus 5 pending approvals (`503`). Bridge messages are acknowledged (`204`) only after they are on disk; a failed write answers `500` and can be retried with the same id. Failed history writes are reported to you and counted in `/health`.
+
+## Release builds
+
+Releases are built from a tag by GitHub Actions in two jobs. The build job installs dependencies, runs the audit and tests, and builds with a read-only token; the publish job runs no dependency code and only attests (build provenance) and releases the files the build job produced. Verify a download with `gh attestation verify main.js --repo Thattansillkid/hivemynd`.
 
 ## Safe defaults
 

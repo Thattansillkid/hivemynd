@@ -22,15 +22,16 @@ import { THEMES, chromeAccent, themeById } from './themes';
 import { addGroup, showMenu } from './menus';
 import { SHAPES, shapeById } from './shapes';
 import { AudioReactor, SYSTEM_AUDIO } from './audio';
-import { Credential, CredentialMeta, Scope, canAssertAgent, denyListFor, gate, hasScope, isDenied, newCredential, newKey } from './server/auth';
+import { Credential, CredentialMeta, Scope, canAssertAgent, denyListFor, gate, hasScope, isDenied, newCredential, newKey, ownEvent } from './server/auth';
 import { HttpError, LIMITS, readBody, readJsonBody, sendError, sendJson, sendStatus } from './server/http';
 import { nodeDeps, removeSecretFile, vaultKeyDir, writeSecretFile } from './server/keyfile';
-import { PathRules, resolvesInside, vaultRelative } from './server/pathguard';
+import { PathRules, inConfigDir, realRelative, resolvesInside, vaultRelative } from './server/pathguard';
 import { Concurrency, RATE, RateLimiter } from './server/limits';
 import { BridgeMessage, BridgeStore, cleanMessage } from './bridgestore';
 import { readTail } from './filetail';
 import { NoteIO, RestoreConflict, restoreNote } from './restore';
 import { PrewriteOnError, prewriteReply } from './server/prewrite';
+import { Hidden, SHOW_ALL, visibleClaims, visibleEntries, visibleHandoffs, visiblePaths, visibleTasks } from './server/visibility';
 
 
 export type { BridgeMessage } from './bridgestore';
@@ -776,8 +777,12 @@ export default class PlexusPlugin extends Plugin {
     this.teamChanged();
   }
 
-  handoffPackFor(from: string, to?: string, task?: string) {
-    return buildHandoffPack({ from, to, task: task || undefined, entries: this.log.entries, changes: this.changes.records, claims: this.claims.list(), misses: this.misses });
+  handoffPackFor(from: string, to?: string, task?: string, hidden: Hidden = SHOW_ALL) {
+    return buildHandoffPack({
+      from, to, task: task || undefined,
+      entries: visibleEntries(this.log.entries, hidden), changes: visiblePaths(this.changes.records, hidden),
+      claims: visibleClaims(this.claims.list(), hidden), misses: this.misses,
+    });
   }
 
   showTrail(h: Handoff) {
@@ -1032,13 +1037,13 @@ export default class PlexusPlugin extends Plugin {
   }
 
   /** F13: short lines for a heads-up display (agent status, approvals, last answer, brief). */
-  hudLines(): string[] {
+  hudLines(hidden: Hidden = SHOW_ALL): string[] {
     const out: string[] = [];
     const since = Date.now() - 10 * 60_000;
     const last = new Map<string, AccessEntry>();
-    for (const e of this.log.entries) if (e.t >= since && e.action !== 'search') last.set(e.agent, e);
+    for (const e of visibleEntries(this.log.entries, hidden)) if (e.t >= since && e.action !== 'search') last.set(e.agent, e);
     for (const [agent, e] of last) out.push(`${agent} ▸ ${noteTitle(e.notes[0])}`.slice(0, 60));
-    const claims = this.claims.list().length;
+    const claims = visibleClaims(this.claims.list(), hidden).length;
     if (claims) out.push(`${claims} note${claims === 1 ? '' : 's'} claimed`);
     const open = this.tasks.list().filter((t) => t.status === 'proposed').length;
     if (open) out.push(`${open} task${open === 1 ? '' : 's'} to approve`);
@@ -1419,6 +1424,10 @@ export default class PlexusPlugin extends Plugin {
     res.on('close', release);
     // The agent this request acts as: an agent key always acts as its own agent.
     const who = g.who;
+    // Notes in folders hidden from an agent key's own agent stay out of every team
+    // answer too (server/visibility.ts). Bridge and admin keys see everything.
+    const viewDeny = canAssertAgent(cred) ? [] : denyListFor(this.settings.policies, who(null));
+    const hidden: Hidden = viewDeny.length ? (p) => !!p && isDenied(p, viewDeny) : SHOW_ALL;
     this.keyUsed.set(cred.id, Date.now());
     if (req.method === 'GET' && url.pathname === '/health' && !(this.settings.developerMode && hasScope(cred, 'admin'))) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1573,13 +1582,14 @@ export default class PlexusPlugin extends Plugin {
       return;
     }
     // ---- 1.1.0 extras: tasks (F5), authorship (F12), HUD (F13)
-    if (url.pathname === '/tasks' && req.method === 'GET') { json(res, this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000)); return; }
+    if (url.pathname === '/tasks' && req.method === 'GET') { json(res, visibleTasks(this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000), hidden)); return; }
     if (url.pathname === '/authorship' && req.method === 'GET') {
       const path = url.searchParams.get('path') ?? '';
-      void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) })).catch((err) => sendError(res, err));
+      // A hidden note answers exactly like one that doesn't exist.
+      void (hidden(path) ? Promise.resolve(null) : this.authorshipOf(path)).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) })).catch((err) => sendError(res, err));
       return;
     }
-    if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines() }); return; }
+    if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines(hidden) }); return; }
     if (req.method === 'POST' && (url.pathname === '/tasks' || url.pathname === '/tasks/claim' || url.pathname === '/tasks/done' || url.pathname === '/tasks/withdraw')) {
       void readJsonBody(req, LIMITS.json).then((body) => {
         const agent = body?.agent || !canAssertAgent(cred) ? who(body?.agent) : '';
@@ -1616,23 +1626,24 @@ export default class PlexusPlugin extends Plugin {
       return;
     }
     // ---- teamwork: claims, handoffs, trust, gaps, daily brief
-    if (url.pathname === '/claims' && req.method === 'GET') { json(res, this.claims.list()); return; }
-    if (url.pathname === '/handoffs' && req.method === 'GET') { json(res, this.handoffs.slice(-50).reverse()); return; }
+    if (url.pathname === '/claims' && req.method === 'GET') { json(res, visibleClaims(this.claims.list(), hidden)); return; }
+    if (url.pathname === '/handoffs' && req.method === 'GET') { json(res, visibleHandoffs(this.handoffs.slice(-50).reverse(), hidden)); return; }
     if (url.pathname === '/handoff' && req.method === 'GET') {
       const from = this.alias(url.searchParams.get('from') ?? '');
       if (!from) { res.writeHead(400); res.end('from= is required'); return; }
       res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
-      res.end(this.handoffPackFor(from, url.searchParams.get('to') ?? undefined, url.searchParams.get('task') ?? undefined));
+      res.end(this.handoffPackFor(from, url.searchParams.get('to') ?? undefined, url.searchParams.get('task') ?? undefined, hidden));
       return;
     }
     if ((url.pathname === '/check' || url.pathname === '/trust') && req.method === 'GET') {
       const path = url.searchParams.get('path') ?? '';
       const agent = who(url.searchParams.get('agent'));
+      if (hidden(path)) { json(res, { path, claim: null, yours: false, trust: trustScore(path, null, [], []) }); return; }
       const claim = this.claims.holder(path);
       json(res, { path, claim: claim && claim.agent !== agent ? claim : null, yours: claim?.agent === agent, trust: this.trustOf(path) });
       return;
     }
-    if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)).catch((err) => sendError(res, err)); return; }
+    if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, { gaps: visiblePaths(r.gaps, hidden), trust: visiblePaths(r.trust, hidden) })).catch((err) => sendError(res, err)); return; }
     if (req.method === 'POST' && (url.pathname === '/claim' || url.pathname === '/release' || url.pathname === '/brief/now')) {
       void readJsonBody(req, LIMITS.json).then(async (body) => {
         if (url.pathname === '/brief/now') {
@@ -1648,7 +1659,7 @@ export default class PlexusPlugin extends Plugin {
         if (url.pathname === '/release') { json(res, { released: this.claims.release(agent, paths.length ? paths : undefined) }); return; }
         const minutes = Math.max(1, Math.min(480, Number(body?.minutes) || this.settings.claimMinutes));
         const claimed: Claim[] = [], conflicts: (Claim & { handoff: string })[] = [];
-        for (const p of paths) {
+        for (const p of paths.filter((x) => !hidden(x))) {
           const r = this.claims.claim(agent, normalizePath(p), keptPurpose(body?.purpose, this.settings.storePurposes), minutes, true);
           if ('claim' in r) claimed.push(r.claim);
           else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
@@ -1765,9 +1776,8 @@ export default class PlexusPlugin extends Plugin {
         }
         for (const ev of events) {
           if (!ev || typeof ev !== 'object') continue;
-          // Events are reports from the key holder: an agent key's events are always its own.
-          if (!canAssertAgent(cred)) ev.agent = cred.agent;
-          lit += this.pulse(ev);
+          // Events are reports from the key holder (see ownEvent in server/auth.ts).
+          lit += this.pulse(ownEvent(ev, cred));
         }
       } catch {
         res.writeHead(400); res.end(); return;
@@ -2154,7 +2164,7 @@ export default class PlexusPlugin extends Plugin {
     const rel = vaultRelative(path, rules);
     if (!rel || normalizePath(rel) !== normalizePath(path)) return false;
     const d = nodeDeps();
-    if (d && rules.base) return resolvesInside(d.fs, rules.base, path, d.platform);
+    if (d && rules.base) return resolvesInside(d.fs, rules.base, path, d.platform, rules.configDir);
     return this.app.vault.getAbstractFileByPath(path) instanceof TFile;
   }
 
@@ -2226,8 +2236,12 @@ export default class PlexusPlugin extends Plugin {
   }
 
   private confirmRestore(c: ChangeRecord) {
-    const rel = vaultRelative(c.path, this.pathRules());
-    if (!rel || normalizePath(rel) !== normalizePath(c.path)) { new Notice('H!V3MYND: this change names a path outside the vault and can’t be restored.'); return; }
+    const rules = this.pathRules();
+    const rel = vaultRelative(c.path, rules);
+    const d = nodeDeps();
+    // Also by where it really points (links, junctions, short names like OBSIDI~1).
+    const real = d && rules.base && rel ? realRelative(d.fs, rules.base, rel, d.platform) : rel;
+    if (!rel || normalizePath(rel) !== normalizePath(c.path) || !real || inConfigDir(real, rules.configDir)) { new Notice('H!V3MYND: this change names a path outside the vault and can’t be restored.'); return; }
     if (c.stored === 'metadata') { new Notice('H!V3MYND: this change was recorded without its text (history: metadata only), so it can’t be undone.'); return; }
     void this.noteIO().read(c.path).then((current) => new RestoreModal(this.app, c, async () => {
       // Only if the note still reads as it did when this dialog opened (server/restore.ts).

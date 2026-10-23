@@ -24,6 +24,8 @@ export const BRIDGE_LIMITS = {
 };
 
 const DAY_FILE = /(^|\/)\d{4}-\d{2}-\d{2}\.jsonl$/;
+/** No message is dated before this (2000-01-01). */
+const EARLIEST = Date.UTC(2000, 0, 1);
 
 /** A message from the bridge as it may be kept, or null if it isn't one. */
 export function cleanMessage(raw: unknown, now = Date.now()): BridgeMessage | null {
@@ -41,7 +43,9 @@ export function cleanMessage(raw: unknown, now = Date.now()): BridgeMessage | nu
     recipient: text(r.recipient, 60, 'all'),
     body: maskSecrets(text(r.body ?? r.text, BRIDGE_LIMITS.body, '')),
     reply_to: typeof r.reply_to === 'string' ? r.reply_to.slice(0, 120) : null,
-    t: Math.min(t, now + 60_000), // a clock far in the future can't pin a message to the top
+    // A clock far in the future can't pin a message to the top, and one far in the past
+    // can't land it in a file that retention and "Delete stored history" never see.
+    t: Math.max(EARLIEST, Math.min(t, now + 60_000)),
     important: !!r.important,
   };
 }

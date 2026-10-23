@@ -52,21 +52,43 @@ export interface FsLike {
 }
 
 /**
- * Whether `rel`, as it exists on disk, is inside the vault once every link and
- * junction is followed. A path that doesn't exist (or can't be resolved) is not
- * inside: callers treat it as a new note and read nothing.
+ * Where `rel` really points, as a vault-relative path, once every link, junction and
+ * Windows short name (OBSIDI~1) is resolved; null if that is outside the vault. For a
+ * path that doesn't exist yet, its deepest existing folder is resolved and the rest
+ * appended. Case is folded on Windows and macOS.
  */
-export function resolvesInside(fs: FsLike, base: string, rel: string, platform: string): boolean {
+export function realRelative(fs: FsLike, base: string, rel: string, platform: string): string | null {
   const norm = (p: string) => {
     const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
     return platform === 'win32' || platform === 'darwin' ? s.toLowerCase() : s;
   };
-  let realBase: string, real: string;
-  try {
-    realBase = norm(fs.realpathSync.native(base));
-    real = norm(fs.realpathSync.native(`${base.replace(/[\\/]+$/, '')}/${rel}`));
-  } catch {
-    return false;
+  let realBase: string;
+  try { realBase = norm(fs.realpathSync.native(base)); } catch { return null; }
+  const root = base.replace(/[\\/]+$/, '');
+  const segs = rel.split('/').filter(Boolean);
+  for (let i = segs.length; i >= 0; i--) {
+    let real: string;
+    try { real = norm(fs.realpathSync.native(i ? `${root}/${segs.slice(0, i).join('/')}` : root)); } catch { continue; }
+    const rest = segs.slice(i).map((s) => norm(s));
+    if (rest.includes('..')) return null;
+    const full = [real, ...rest].join('/');
+    return full.startsWith(realBase + '/') ? full.slice(realBase.length + 1) : null;
   }
-  return real.startsWith(realBase + '/');
+  return null;
+}
+
+/** Whether `rel` really points at the configuration folder or anything in it. */
+export function inConfigDir(realRel: string, configDir: string) {
+  return realRel.split('/')[0].toLowerCase() === configDir.toLowerCase();
+}
+
+/**
+ * Whether the existing file `rel` is inside the vault and outside its configuration
+ * folder once every link, junction and short name is resolved. A path that doesn't
+ * exist (or can't be resolved) is not: callers treat it as a new note and read nothing.
+ */
+export function resolvesInside(fs: FsLike, base: string, rel: string, platform: string, configDir = '.obsidian'): boolean {
+  try { fs.realpathSync.native(`${base.replace(/[\\/]+$/, '')}/${rel}`); } catch { return false; }
+  const real = realRelative(fs, base, rel, platform);
+  return real !== null && !inConfigDir(real, configDir);
 }

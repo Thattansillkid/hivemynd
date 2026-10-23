@@ -53,18 +53,19 @@ describe('small-body routes', () => {
 
 describe('cleanMessage', () => {
   it('bounds every field and masks secrets', () => {
-    const m = cleanMessage({ id: 'a', sender: 's'.repeat(500), body: `${ANTHROPIC} ${'b'.repeat(50_000)}`, reply_to: { evil: true }, ts: 1 })!;
+    const m = cleanMessage({ id: 'a', sender: 's'.repeat(500), body: `${ANTHROPIC} ${'b'.repeat(50_000)}`, reply_to: { evil: true }, ts: 1_790_000_000 })!;
     expect(m.sender).toHaveLength(60);
     expect(m.body.length).toBeLessThanOrEqual(BRIDGE_LIMITS.body);
     expect(m.body).not.toContain(ANTHROPIC);
     expect(m.reply_to).toBeNull();
-    expect(m.t).toBe(1000);
+    expect(m.t).toBe(1_790_000_000_000);
   });
   it('rejects things that are not messages', () => {
     for (const raw of [null, 1, 'x', {}, { id: '' }, { id: 5 }, { id: 'x'.repeat(200) }]) expect(cleanMessage(raw)).toBeNull();
   });
   it('does not let a far-future clock pin a message', () => {
-    expect(cleanMessage({ id: 'a', ts: 9e12 }, 1000)!.t).toBe(61_000);
+    const now = Date.UTC(2026, 9, 22);
+    expect(cleanMessage({ id: 'a', ts: 9e12 }, now)!.t).toBe(now + 60_000);
   });
 });
 

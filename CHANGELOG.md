@@ -17,6 +17,7 @@ Security and reliability release, from an external audit of 1.1.0. Thank you to 
 - **Restore checks for edits made after you opened it** and replaces nothing if the note changed.
 - **Key files per vault** under `~/.hivemynd/vaults/`, owner-only on every platform (Windows ACLs are set, not just a POSIX mode). The bridge reads `--key-file` / `HIVEMYND_KEY_FILE`.
 - `nvidia-smi` and `icacls` are run by full path.
+- From a second security review of this release: only Bridge and Admin keys may send a note's previous text (other keys could have planted an undo); Windows short names like `OBSIDI~1` no longer get past the configuration-folder check (checked on the real path, for reads and for restore); notes in an agent's hidden folders are left out of claims, handoffs, tasks, gaps, trust, authorship and the HUD for that agent's key; bridge message dates are clamped so none escapes retention; the release workflow builds and tests with a read-only token and publishes from a separate job that runs no dependency code.
 - Tests (vitest) for every audit finding, run in CI and before each release; patched dev dependencies (`npm audit`: 0).
 - SECURITY.md now documents the threat model, key kinds, what is advisory (event labels, pre-write replies, trust scores and context packs), what is stored where, and the limits.
 

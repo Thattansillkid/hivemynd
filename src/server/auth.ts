@@ -199,6 +199,18 @@ export function gate(req: { method?: string; url?: string; headers: Record<strin
   return { ok: true, url, cred, route, who };
 }
 
+/**
+ * An event as reported with this key. Agent and observer keys always report as their
+ * own agent, and may not send a note's previous text (only the bridge, which performs
+ * the write itself, can; from anyone else it could plant an undo that rewrites the note).
+ */
+export function ownEvent<T extends { agent?: unknown; before?: unknown }>(ev: T, c: Credential): T {
+  if (canAssertAgent(c)) return ev;
+  const out = { ...ev, agent: c.agent };
+  delete out.before;
+  return out;
+}
+
 // ------------------------------------------------------------------ read policy
 
 export interface DenyPolicy { deny: string }
