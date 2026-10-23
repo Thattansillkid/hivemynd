@@ -20,7 +20,7 @@ export interface PathRules {
  */
 export function vaultRelative(input: string, rules: PathRules): string | null {
   let t = input.trim();
-  if (!t || t.length > 1024 || /[\0-\x1f]/.test(t)) return null;
+  if (!t || t.length > 1024 || [...t].some((ch) => ch.charCodeAt(0) < 0x20)) return null; // control characters
   t = t.replace(/\\/g, '/');
   // UNC (//server/share) and device paths (//?/, //./) never name a vault note.
   if (t.startsWith('//')) return null;

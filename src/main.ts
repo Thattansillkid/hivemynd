@@ -23,20 +23,15 @@ import { addGroup, showMenu } from './menus';
 import { SHAPES, shapeById } from './shapes';
 import { AudioReactor, SYSTEM_AUDIO } from './audio';
 import { Credential, CredentialMeta, Scope, canAssertAgent, denyListFor, gate, hasScope, isDenied, newCredential, newKey } from './server/auth';
-import { sendError, sendJson, sendStatus } from './server/http';
+import { HttpError, LIMITS, readBody, readJsonBody, sendError, sendJson, sendStatus } from './server/http';
 import { nodeDeps, removeSecretFile, vaultKeyDir, writeSecretFile } from './server/keyfile';
 import { PathRules, resolvesInside, vaultRelative } from './server/pathguard';
+import { Concurrency, RATE, RateLimiter } from './server/limits';
+import { BridgeMessage, BridgeStore, cleanMessage } from './bridgestore';
+import { readTail } from './filetail';
 
 
-export interface BridgeMessage {
-  id: string;
-  sender: string;
-  recipient: string;
-  body: string;
-  reply_to: string | null;
-  t: number;
-  important: boolean;
-}
+export type { BridgeMessage } from './bridgestore';
 import { AccessLogView, BudgetRange, GraphInfo, LOG_VIEW_TYPE } from './logview';
 import { LAYOUT_VERSION, PanelPos } from './dashboard';
 import { Monitor } from './monitor';
@@ -311,7 +306,7 @@ export default class PlexusPlugin extends Plugin {
   // Grok also runs Claude's hooks, so one Grok tool call can arrive twice under two names.
   private recent = new Map<string, { agent: string; at: number }>();
   // Exposed on GET /health so agent wiring can be checked against what actually lit.
-  private stats = { pulses: 0, lit: 0, last: null as null | { at: string; agent: string; kind: string; notes: string[] } };
+  private stats = { pulses: 0, lit: 0, persistFailures: 0, last: null as null | { at: string; agent: string; kind: string; notes: string[] } };
   log!: AccessLog;
   monitor!: Monitor;
   // Latest user prompt per agent session (and per agent as a fallback), so each
@@ -325,7 +320,10 @@ export default class PlexusPlugin extends Plugin {
   changes!: ChangeStore;
   // Note text captured just before an agent's write (from PreToolUse hooks), by path.
   private pendingBefore = new Map<string, { text: string | null; t: number }>();
-  bridgeMessages: BridgeMessage[] = [];
+  bridge!: BridgeStore;
+  private rate = new RateLimiter(RATE.burst, RATE.perSecond);
+  private inflight = new Concurrency(RATE.concurrent);
+  private approvals = new Concurrency(RATE.approvals);
   private bridgeListeners = new Set<(m: BridgeMessage) => void>();
   replaying = false;
   misses: SearchMiss[] = [];
@@ -371,7 +369,9 @@ export default class PlexusPlugin extends Plugin {
     this.changes.mode = this.settings.historyMode;
     await this.changes.prune(this.settings.historyDays);
     await this.changes.load();
-    await this.loadBridgeMessages();
+    this.bridge = new BridgeStore(this.app.vault.adapter, `${this.manifest.dir}/bridge`, `${this.manifest.dir}/bridge-messages.jsonl`);
+    await this.bridge.prune(this.settings.historyDays);
+    await this.bridge.load();
     await this.loadMisses();
     await this.loadPurposes();
     await this.loadTeam();
@@ -431,7 +431,7 @@ export default class PlexusPlugin extends Plugin {
       approveTask: (id) => { this.tasks.update(id, { status: 'open' }); },
       removeTask: (id) => this.tasks.remove(id),
       restore: (c) => this.confirmRestore(c),
-      bridge: () => this.bridgeMessages,
+      bridge: () => this.bridge.messages,
       onBridge: (fn) => { this.bridgeListeners.add(fn); return () => this.bridgeListeners.delete(fn); },
       alias: (n) => this.alias(n),
       // Layouts saved before the current default (LAYOUT_VERSION) start fresh.
@@ -1407,6 +1407,11 @@ export default class PlexusPlugin extends Plugin {
     const g = gate(req, { credentials: this.listenerCredentials(), developerMode: this.settings.developerMode, alias: (n) => this.alias(n) });
     if (!g.ok) { if (g.body) sendJson(res, g.body, g.status); else sendStatus(res, g.status, g.text); return; }
     const { url, cred } = g;
+    // Budgets per key and overall, so a flood can't exhaust memory or the window.
+    if (!this.rate.take(cred.id)) { sendStatus(res, 429, 'slow down'); return; }
+    const release = (g.route.key === 'POST /approve' ? this.approvals : this.inflight).enter();
+    if (!release) { sendStatus(res, 503, 'busy'); return; }
+    res.on('close', release);
     // The agent this request acts as: an agent key always acts as its own agent.
     const who = g.who;
     this.keyUsed.set(cred.id, Date.now());
@@ -1436,16 +1441,11 @@ export default class PlexusPlugin extends Plugin {
     }
     if (req.method === 'POST' && url.pathname === '/focus') {
       // Light a set of notes in the brain: {notes: [paths], agent}; an empty body clears.
-      let body = '';
-      req.on('data', (c: string) => { body += c; });
-      req.on('end', () => {
-        try {
-          const d = body.trim() ? JSON.parse(body) : {};
-          this.focusTask(Array.isArray(d.notes) && d.notes.length ? d.notes : null, who(d.agent));
-          res.writeHead(204);
-        } catch { res.writeHead(400); }
-        res.end();
-      });
+      void readJsonBody(req, LIMITS.small).then((d) => {
+        const notes = Array.isArray(d?.notes) ? (d.notes as unknown[]).filter((n): n is string => typeof n === 'string').slice(0, 200) : [];
+        this.focusTask(notes.length ? notes : null, who(d?.agent));
+        sendStatus(res, 204);
+      }).catch((err) => sendError(res, err));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/music') {
@@ -1513,27 +1513,21 @@ export default class PlexusPlugin extends Plugin {
     }
     if (req.method === 'POST' && url.pathname === '/approve') {
       // The bridge holds an agent's PC action until a person decides here.
-      let body = '';
-      req.on('data', (c: string) => { body += c; if (body.length > 20_000) req.destroy(); });
-      req.on('end', () => {
-        let d: { agent?: string; action?: string; detail?: string } = {};
-        try { d = JSON.parse(body); } catch { /* empty */ }
-        void this.toGlasses(`Approval needed: ${d.agent ?? 'an agent'} wants to ${d.action ?? 'act'}${d.detail ? ` (${String(d.detail).slice(0, 80)})` : ''}`);
-        void this.askApproval(d).then((approved) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ approved }));
-        });
-      });
+      void readJsonBody(req, LIMITS.small).then(async (raw) => {
+        const str = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : undefined);
+        const d = { agent: str(raw?.agent, 60), action: str(raw?.action, 200), detail: str(raw?.detail, 1000) };
+        void this.toGlasses(`Approval needed: ${d.agent ?? 'an agent'} wants to ${d.action ?? 'act'}${d.detail ? ` (${d.detail.slice(0, 80)})` : ''}`);
+        sendJson(res, { approved: await this.askApproval(d) });
+      }).catch((err) => sendError(res, err));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/policy-block') {
       // The bridge refused an agent something its permissions don't allow.
-      let body = '';
-      req.on('data', (c: string) => { body += c; });
-      req.on('end', () => {
-        try { this.policyBlocked(JSON.parse(body)); } catch { /* ignore */ }
-        res.writeHead(204); res.end();
-      });
+      void readJsonBody(req, LIMITS.small).then((d) => {
+        const str = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : undefined);
+        this.policyBlocked({ agent: str(d?.agent, 60), action: str(d?.action, 200), detail: str(d?.detail, 500) });
+        sendStatus(res, 204);
+      }).catch((err) => sendError(res, err));
       return;
     }
     if (req.method === 'GET' && url.pathname === '/context-pack') {
@@ -1542,10 +1536,7 @@ export default class PlexusPlugin extends Plugin {
       const q = (url.searchParams.get('q') ?? '').slice(0, 300);
       const agent = who(url.searchParams.get('agent'));
       const budget = Math.min(50_000, Math.max(500, Number(url.searchParams.get('budget')) || 6000));
-      void this.contextPack(q, budget, agent).then((pack) => {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(pack));
-      }).catch((err) => { res.writeHead(500); res.end(String(err)); });
+      void this.contextPack(q, budget, agent).then((pack) => sendJson(res, pack)).catch((err) => sendError(res, err));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/report') {
@@ -1580,12 +1571,12 @@ export default class PlexusPlugin extends Plugin {
     if (url.pathname === '/tasks' && req.method === 'GET') { json(res, this.tasks.list().filter((t) => t.status !== 'done' || Date.now() - (t.done ?? 0) < 86_400_000)); return; }
     if (url.pathname === '/authorship' && req.method === 'GET') {
       const path = url.searchParams.get('path') ?? '';
-      void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) }));
+      void this.authorshipOf(path).then((a) => json(res, { path, ...(a ?? { total: 0, agent: 0, human: 0, byAgent: {} }) })).catch((err) => sendError(res, err));
       return;
     }
     if (url.pathname === '/hud' && req.method === 'GET') { json(res, { lines: this.hudLines() }); return; }
     if (req.method === 'POST' && (url.pathname === '/tasks' || url.pathname === '/tasks/claim' || url.pathname === '/tasks/done' || url.pathname === '/tasks/withdraw')) {
-      void readJson(req).then((body) => {
+      void readJsonBody(req, LIMITS.json).then((body) => {
         const agent = body?.agent || !canAssertAgent(cred) ? who(body?.agent) : '';
         if (!agent) { res.writeHead(400); res.end('agent is required'); return; }
         if (url.pathname === '/tasks') {
@@ -1616,7 +1607,7 @@ export default class PlexusPlugin extends Plugin {
         if (t.path) this.claims.release(agent, [t.path]);
         new Notice(`H!V3MYND: ${agent} finished “${t.title}”.`, 6000);
         json(res, { ok: true });
-      }).catch(() => { res.writeHead(400); res.end(); });
+      }).catch((err) => sendError(res, err));
       return;
     }
     // ---- teamwork: claims, handoffs, trust, gaps, daily brief
@@ -1636,9 +1627,9 @@ export default class PlexusPlugin extends Plugin {
       json(res, { path, claim: claim && claim.agent !== agent ? claim : null, yours: claim?.agent === agent, trust: this.trustOf(path) });
       return;
     }
-    if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)); return; }
+    if (url.pathname === '/gaps' && req.method === 'GET') { void this.radarData().then((r) => json(res, r)).catch((err) => sendError(res, err)); return; }
     if (req.method === 'POST' && (url.pathname === '/claim' || url.pathname === '/release' || url.pathname === '/brief/now')) {
-      void readJson(req).then(async (body) => {
+      void readJsonBody(req, LIMITS.json).then(async (body) => {
         if (url.pathname === '/brief/now') {
           // Optional "day": YYYY-MM-DD (default today, so far).
           const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(body?.day ?? ''));
@@ -1658,7 +1649,7 @@ export default class PlexusPlugin extends Plugin {
           else conflicts.push({ ...r.conflict, handoff: `http://127.0.0.1:${this.settings.port}/handoff?from=${encodeURIComponent(r.conflict.agent)}&to=${encodeURIComponent(agent)}` });
         }
         json(res, { ok: !conflicts.length, claimed, conflicts });
-      }).catch(() => { res.writeHead(400); res.end(); });
+      }).catch((err) => sendError(res, err));
       return;
     }
     if (req.method === 'GET' && url.pathname === '/snapshot') {
@@ -1714,13 +1705,7 @@ export default class PlexusPlugin extends Plugin {
     const prewrite = /^\/prewrite\/([a-z0-9_-]{1,40})$/i.exec(url.pathname);
     const bridgeMsg = url.pathname === '/bridge-message';
     if (req.method !== 'POST' || (url.pathname !== '/pulse' && !hook && !prompt && !prewrite && !bridgeMsg)) { res.writeHead(404); res.end(); return; }
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk: string) => {
-      body += chunk;
-      if (body.length > 1_000_000) { res.writeHead(413); res.end(); req.destroy(); }
-    });
-    req.on('end', () => {
+    void readBody(req, LIMITS.event).then((body) => {
       let lit = 0;
       try {
         const data = JSON.parse(body);
@@ -1742,8 +1727,13 @@ export default class PlexusPlugin extends Plugin {
           return;
         }
         if (bridgeMsg) {
-          for (const m of Array.isArray(data) ? data : [data]) this.addBridgeMessage(m);
-          res.writeHead(204); res.end(); return;
+          // 204 only once every message is on disk; a retry with the same ids is safe.
+          const list: unknown[] = Array.isArray(data) ? data : [data];
+          if (list.length > RATE.messages) { sendStatus(res, 413, `at most ${RATE.messages} messages per request`); return; }
+          void (async () => { for (const m of list) await this.addBridgeMessage(m); })()
+            .then(() => sendStatus(res, 204))
+            .catch((err) => { console.warn('H!V3MYND: could not save a bridge message', err); sendStatus(res, 500, 'message not saved'); });
+          return;
         }
         if (prompt) {
           const p = promptFromHook(data);
@@ -1757,6 +1747,7 @@ export default class PlexusPlugin extends Plugin {
           res.writeHead(204); res.end(); return;
         }
         const events: PulseEvent[] = hook ? hookToEvents(data, hook[1].toLowerCase()) : Array.isArray(data.events) ? data.events : [data];
+        if (events.length > RATE.events) { sendStatus(res, 413, `at most ${RATE.events} events per request`); return; }
         if (hook) {
           const adapter = this.app.vault.adapter;
           const miss = searchMiss(data, adapter instanceof FileSystemAdapter ? adapter.getBasePath() : '');
@@ -1775,7 +1766,7 @@ export default class PlexusPlugin extends Plugin {
       if (hook) { res.writeHead(204); res.end(); return; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, lit }));
-    });
+    }).catch((err) => sendError(res, err));
   }
 
   stopServer() {
@@ -2038,8 +2029,7 @@ export default class PlexusPlugin extends Plugin {
   async purgeHistory() {
     await this.changes.purge();
     await this.forgetPurposes();
-    this.bridgeMessages.length = 0;
-    try { if (await this.app.vault.adapter.exists(this.bridgeFile())) await this.app.vault.adapter.remove(this.bridgeFile()); } catch { /* gone */ }
+    await this.bridge.purge();
   }
 
   private missFile() { return `${this.manifest.dir}/search-misses.jsonl`; }
@@ -2047,7 +2037,7 @@ export default class PlexusPlugin extends Plugin {
   private async loadMisses() {
     try {
       if (!(await this.app.vault.adapter.exists(this.missFile()))) return;
-      for (const line of (await this.app.vault.adapter.read(this.missFile())).split('\n')) {
+      for (const line of (await readTail(this.app.vault.adapter, this.missFile(), 1_000_000)).split('\n')) {
         if (!line.trim()) continue;
         try { this.misses.push(JSON.parse(line)); } catch { /* torn line */ }
       }
@@ -2056,8 +2046,22 @@ export default class PlexusPlugin extends Plugin {
   }
 
   private addMiss(m: SearchMiss) {
-    this.misses.push(m);
-    void this.app.vault.adapter.append(this.missFile(), JSON.stringify(m) + '\n');
+    const miss = { ...m, query: maskSecrets(m.query.slice(0, 300)) };
+    this.misses.push(miss);
+    if (this.misses.length > 2000) this.misses.splice(0, this.misses.length - 2000);
+    void this.app.vault.adapter.append(this.missFile(), JSON.stringify(miss) + '\n').catch((err) => this.persistFailed('search log', err));
+  }
+
+  private lastPersistNotice = 0;
+
+  /** A log or history write failed: count it (shown in /health) and tell the user, at most every 10 minutes. */
+  persistFailed(what: string, err: unknown) {
+    this.stats.persistFailures++;
+    console.warn(`H!V3MYND: could not save ${what}`, err);
+    if (Date.now() - this.lastPersistNotice > 10 * 60_000) {
+      this.lastPersistNotice = Date.now();
+      new Notice(`H!V3MYND couldn't save its ${what} (${err instanceof Error ? err.message : String(err)}). Check free disk space and the plugin folder.`, 10_000);
+    }
   }
 
   private gapData() {
@@ -2173,7 +2177,7 @@ export default class PlexusPlugin extends Plugin {
     const after = (await this.readableNote(path)) ? await this.app.vault.adapter.read(path) : null;
     if (before === after) return;
     const masked = after !== null && this.settings.autoMaskSecrets && this.settings.secretScan !== 'off' ? newSecrets(before, after) : [];
-    await this.changes.add({
+    const saved = await this.changes.add({
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       t: Date.now(),
       agent,
@@ -2183,6 +2187,7 @@ export default class PlexusPlugin extends Plugin {
       before,
       after,
     });
+    if (!saved) this.persistFailed('change history', new Error('write failed'));
     if (masked.length && after !== null) await this.maskNote(path, after, masked.map((h) => h.kind), agent);
   }
 
@@ -2244,47 +2249,21 @@ export default class PlexusPlugin extends Plugin {
 
   // ------------------------------------------------------------ bridge traffic
 
-  private bridgeFile() { return `${this.manifest.dir}/bridge-messages.jsonl`; }
-
-  private async loadBridgeMessages() {
-    try {
-      if (!(await this.app.vault.adapter.exists(this.bridgeFile()))) return;
-      const seen = new Set<string>();
-      for (const line of (await this.app.vault.adapter.read(this.bridgeFile())).split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const m = JSON.parse(line) as BridgeMessage;
-          if (!seen.has(m.id)) { seen.add(m.id); this.bridgeMessages.push(m); }
-        } catch { /* torn line */ }
-      }
-      this.bridgeMessages.sort((a, b) => a.t - b.t);
-    } catch (err) {
-      console.warn('H!V3MYND: could not load bridge messages', err);
-    }
-  }
-
-  private addBridgeMessage(raw: any) {
-    if (!raw || typeof raw.id !== 'string' || this.bridgeMessages.some((m) => m.id === raw.id)) return;
-    const t = typeof raw.ts === 'number' ? raw.ts * 1000 : Date.parse(raw.timestamp ?? '') || Date.now();
-    const m: BridgeMessage = {
-      id: raw.id,
-      sender: String(raw.sender ?? 'other'),
-      recipient: String(raw.recipient ?? 'all'),
-      body: maskSecrets(String(raw.body ?? raw.text ?? '')),
-      reply_to: raw.reply_to ?? null,
-      t,
-      important: !!raw.important,
-    };
-    this.bridgeMessages.push(m);
-    this.bridgeMessages.sort((a, b) => a.t - b.t);
-    // Metadata mode keeps who, to whom and when on disk; the text stays in memory only.
-    const kept = this.settings.bridgeMessageStore === 'metadata' ? { ...m, body: '' } : m;
-    void this.app.vault.adapter.append(this.bridgeFile(), JSON.stringify(kept) + '\n');
+  /**
+   * Stores one message from the bridge and waits until it is on disk. Resolves false
+   * for something that isn't a message; rejects if it couldn't be saved.
+   */
+  private async addBridgeMessage(raw: unknown): Promise<boolean> {
+    const m = cleanMessage(raw);
+    if (!m) return false;
+    this.bridge.metadataOnly = this.settings.bridgeMessageStore === 'metadata';
+    if ((await this.bridge.add(m)) === 'duplicate') return true;
     // Only animate fresh traffic, not a history backfill.
-    if (Date.now() - t < 60_000 && !this.replaying) {
+    if (Date.now() - m.t < 60_000 && !this.replaying) {
       for (const v of this.views()) v.renderer?.message(this.alias(m.sender), m.recipient === 'all' ? 'all' : this.alias(m.recipient));
     }
     for (const fn of this.bridgeListeners) fn(m);
+    return true;
   }
 
   // ------------------------------------------------------------ music reactivity
@@ -3726,17 +3705,6 @@ async function findWindow(remote: ElectronRemote, doc: Document, d: SpanDisplay)
 function json(res: any, body: unknown) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
-}
-
-function readJson(req: any): Promise<any> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (c: string) => { body += c; if (body.length > 200_000) { req.destroy(); reject(new Error('too large')); } });
-    const fail = (err: unknown) => reject(err instanceof Error ? err : new Error(String(err)));
-    req.on('end', () => { try { resolve(body.trim() ? JSON.parse(body) : {}); } catch (err) { fail(err); } });
-    req.on('error', fail);
-  });
 }
 
 function ymd(d: Date) {
