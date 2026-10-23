@@ -29,6 +29,8 @@ import { PathRules, resolvesInside, vaultRelative } from './server/pathguard';
 import { Concurrency, RATE, RateLimiter } from './server/limits';
 import { BridgeMessage, BridgeStore, cleanMessage } from './bridgestore';
 import { readTail } from './filetail';
+import { NoteIO, RestoreConflict, restoreNote } from './restore';
+import { PrewriteOnError, prewriteReply } from './server/prewrite';
 
 
 export type { BridgeMessage } from './bridgestore';
@@ -66,6 +68,8 @@ interface PlexusSettings extends PlexusOptions {
   claimMinutes: number;
   /** Agents whose pre-write hook understands H!V3MYND's reply (Claude Code's format). */
   hookReplies: string;
+  /** When a pre-write check fails: block (hold the write back), allow, or auto (block if claims or secret scanning block). */
+  prewriteOnError: PrewriteOnError;
   handoffs: boolean;
   trustWarnings: boolean;
   /** Daily brief: a note about yesterday's agent work, written each morning. */
@@ -227,6 +231,7 @@ const DEFAULT_SETTINGS: PlexusSettings = {
   claimMode: 'warn',
   claimMinutes: 20,
   hookReplies: 'claude',
+  prewriteOnError: 'auto',
   handoffs: true,
   trustWarnings: true,
   briefEnabled: false, // opt-in: it writes a note (and a video) every day
@@ -1714,16 +1719,21 @@ export default class PlexusPlugin extends Plugin {
           // note is claimed by another agent, or the agent is relying on a note with low
           // trust, the reply tells it so (Claude Code's PreToolUse format: the reason is
           // shown to the agent and the edit is held back).
+          // A failed check is its own outcome (see server/prewrite.ts): held back when
+          // claims or secret scanning block, otherwise allowed and marked as unchecked.
           const raw = prewrite[1].toLowerCase();
+          const answer = (reason: string | null, error?: unknown) => {
+            if (error !== undefined) this.persistFailed('pre-write check', error);
+            const r = prewriteReply({
+              reason, error, replies: this.hookReplyAgents().has(raw), onError: this.settings.prewriteOnError,
+              enforcing: this.settings.claimMode === 'block' || this.settings.secretScan === 'block',
+            });
+            res.writeHead(r.status, r.headers);
+            res.end(r.body);
+          };
           void this.snapshotBefore(data, raw)
             .then((paths) => this.preWriteReply(this.alias(raw), paths, data))
-            .catch(() => null)
-            .then((reason) => {
-              if (reason && this.hookReplyAgents().has(raw)) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
-              } else { res.writeHead(204); res.end(); }
-            });
+            .then((reason) => answer(reason), (err) => answer(null, err ?? new Error('unknown error')));
           return;
         }
         if (bridgeMsg) {
@@ -2219,17 +2229,14 @@ export default class PlexusPlugin extends Plugin {
     const rel = vaultRelative(c.path, this.pathRules());
     if (!rel || normalizePath(rel) !== normalizePath(c.path)) { new Notice('H!V3MYND: this change names a path outside the vault and can’t be restored.'); return; }
     if (c.stored === 'metadata') { new Notice('H!V3MYND: this change was recorded without its text (history: metadata only), so it can’t be undone.'); return; }
-    new RestoreModal(this.app, c, async () => {
-      const adapter = this.app.vault.adapter;
-      const current = (await adapter.exists(c.path)) ? await adapter.read(c.path) : null;
-      if (c.before === null) {
-        // The write created the note: undo moves it to Obsidian's trash (recoverable).
-        const f = this.app.vault.getAbstractFileByPath(c.path);
-        if (f) await this.app.fileManager.trashFile(f);
-      } else {
-        const f = this.app.vault.getAbstractFileByPath(c.path);
-        if (f instanceof TFile) await this.app.vault.process(f, () => c.before as string);
-        else await this.app.vault.create(c.path, c.before);
+    void this.noteIO().read(c.path).then((current) => new RestoreModal(this.app, c, async () => {
+      // Only if the note still reads as it did when this dialog opened (server/restore.ts).
+      try {
+        await restoreNote(this.noteIO(), c.path, c.before, current);
+      } catch (err) {
+        if (!(err instanceof RestoreConflict)) throw err;
+        new Notice(`H!V3MYND: “${noteTitle(c.path)}” changed after you opened this restore, so nothing was replaced. Open the change again to review the latest version.`, 10_000);
+        return;
       }
       // The undo is itself a change, so it can be undone too.
       await this.changes.add({
@@ -2244,7 +2251,18 @@ export default class PlexusPlugin extends Plugin {
         restoreOf: c.id,
       });
       new Notice(`Restored “${noteTitle(c.path)}” to before ${c.agent}'s change.`);
-    }).open();
+    }).open());
+  }
+
+  /** Obsidian's vault API in the shape restoreNote() needs. */
+  private noteIO(): NoteIO {
+    const v = this.app.vault;
+    return {
+      read: async (path) => { const f = v.getAbstractFileByPath(path); return f instanceof TFile ? v.read(f) : null; },
+      process: async (path, fn) => { const f = v.getAbstractFileByPath(path); if (!(f instanceof TFile)) throw new RestoreConflict(path); await v.process(f, fn); },
+      create: async (path, text) => { await v.create(path, text); },
+      trash: async (path) => { const f = v.getAbstractFileByPath(path); if (f) await this.app.fileManager.trashFile(f); },
+    };
   }
 
   // ------------------------------------------------------------ bridge traffic
@@ -2638,8 +2656,9 @@ class RestoreModal extends Modal {
     contentEl.createEl('p', {
       text: created
         ? `${this.c.agent} created “${noteTitle(this.c.path)}”. Undoing moves it to Obsidian's trash (.trash), where you can still recover it.`
-        : `This puts “${noteTitle(this.c.path)}” back to how it was just before ${this.c.agent}'s change at ${new Date(this.c.t).toLocaleTimeString([], { hour12: false })}. Anything written since then is replaced; the current version is kept as a new entry in Changes, so this can be undone too.`,
+        : `This puts “${noteTitle(this.c.path)}” back to how it was just before ${this.c.agent}'s change at ${new Date(this.c.t).toLocaleTimeString([], { hour12: false })}. Anything written since that change is replaced; the current version is kept as a new entry in Changes, so this can be undone too. If the note changes while this dialog is open, nothing is replaced.`,
     });
+    if (this.c.stored === 'redacted') contentEl.createEl('p', { text: 'Keys and tokens were masked when this change was saved, so any in the restored text come back masked.' });
     const row = contentEl.createDiv({ cls: 'modal-button-container' });
     row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
     const ok = row.createEl('button', { cls: 'mod-warning', text: created ? 'Move to trash' : 'Restore' });
@@ -3466,7 +3485,9 @@ class PlexusSettingTab extends PluginSettingTab {
     toggle('Live presence rings', 'Ring the note each active agent is working on right now, in its colour.', 'presenceRings', () => this.plugin.refreshMarkers());
     new Setting(containerEl).setName('Secret scanner').setDesc('Keys and tokens in an agent\'s edit: warn it once, block the edit, or off. Also keeps them out of the access log and bridge history.')
       .addDropdown((d) => d.addOptions({ warn: 'Warn (retry goes through)', block: 'Block', off: 'Off' }).setValue(s.secretScan).onChange((v) => { s.secretScan = v as PlexusSettings['secretScan']; save(); }));
-    toggle('Mask secrets agents write', 'If a key or token still lands in a note, replace it with a masked stub. Recorded as a change you can undo.', 'autoMaskSecrets');
+    toggle('Mask secrets agents write', 'If a key or token still lands in a note, replace it with a masked stub. With raw change history this is recorded as a change you can undo; otherwise the original value is not kept.', 'autoMaskSecrets');
+    new Setting(containerEl).setName('If a pre-write check fails').setDesc('When H!V3MYND can’t check an agent’s edit (claims, secrets, trust) because of an error. Hold back: the edit is refused with an explanation. Let through: the edit goes ahead, marked as unchecked. Automatic: hold back when claims or the secret scanner are set to Block. Agents only stop if their hook system honours the reply.')
+      .addDropdown((d) => d.addOptions({ auto: 'Automatic', block: 'Hold back', allow: 'Let through' }).setValue(s.prewriteOnError).onChange((v) => { s.prewriteOnError = v as PrewriteOnError; save(); }));
 
     new Setting(containerEl).setName('Performance').setHeading();
     toggle('Low-latency mode', 'For slower machines: no bloom, depth of field, nebula, sparks, close-up marbles or brief time-lapses.', 'lowLatency', () => this.plugin.applyLowLatency());
