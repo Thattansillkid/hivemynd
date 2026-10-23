@@ -713,6 +713,8 @@ export class AccessLogView extends ItemView {
     c.style.setProperty('--agent', agent === 'all' ? '#e4f8f6' : colorOf(this.host.agents(), agent));
     c.createSpan({ cls: 'plexus-log-dot' });
     c.createSpan({ text: agent === 'all' ? 'everyone' : agent });
+    // What agents do is what their key reported, not something H!V3MYND observed itself.
+    if (agent !== 'all' && agent !== 'you' && agent !== 'H!V3MYND') c.setAttr('aria-label', `Reported by ${agent}'s key`);
     return c;
   }
 

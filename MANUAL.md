@@ -292,9 +292,18 @@ Monitors with very different pixel densities may not line up exactly at the edge
 
 ## 6. Connecting agents
 
-Agents report what they do to a listener that runs inside Obsidian, on your computer only (`127.0.0.1`, port `27183` by default). Every request needs your key, which keeps other programs out.
+Agents report what they do to a listener that runs inside Obsidian, on your computer only (`127.0.0.1`, port `27183` by default). Every request needs a key, which keeps other programs out.
 
-The quickest way: **Settings → H!V3MYND → Connect your agents**. Each snippet already contains your port and key; copy it and paste it where it says.
+Each agent gets **its own key**, and a key can only act as its own agent: Claude's key can't read Grok's context packs or report activity as Grok. **Settings → H!V3MYND → Agent keys** lists them. Each agent's row has its Claude Code hooks and a curl example, already filled in with the port and that agent's key; copy one and paste it where it says. **Add a key** makes one for another agent.
+
+| Kind of key | For | Can |
+|---|---|---|
+| Observer | Anything that should only report activity | Light the brain and log accesses; nothing readable |
+| Agent | An agent's hooks | Also pre-write checks, context packs, tasks, claims, handoffs, trust, the daily brief |
+| Bridge | The Agent Bridge | Also act for any agent (the bridge checks its own agents), approvals, bridge messages. Saved to a file the bridge reads; the path is shown in the row |
+| Admin | Building on H!V3MYND | Everything, including the Developer mode tools |
+
+**Upgrading from 1.1:** the single shared key keeps working until you retire it. Click **Create agent keys**, paste each agent's new snippet (and point the bridge at its new key file, see `docs/BRIDGE.md`), then click **Retire shared key**. Each row shows when the key was last used, so you can see when nothing uses the shared key any more.
 
 ### Claude Code
 
@@ -312,11 +321,11 @@ Anything that can make a web request can report activity:
 
 ```bash
 curl -s -m 1 -H "X-Hivemynd-Key: <your key>" -H "Content-Type: application/json" \
-  -d '{"agent":"my-agent","kind":"read","texts":["Projects/Plan.md"]}' \
+  -d '{"kind":"read","texts":["Projects/Plan.md"]}' \
   http://127.0.0.1:27183/pulse
 ```
 
-`kind` is `read`, `write` or `scan` (search results). `texts` holds vault paths, or any text that contains them.
+`kind` is `read`, `write` or `scan` (search results). `texts` holds vault paths, or any text that contains them. The agent is the one the key belongs to.
 
 Tools with shell hooks can pipe their hook payload straight in:
 
@@ -357,7 +366,15 @@ Messages between agents that go through a bridge, newest first.
 
 ### Changes
 
-Every note an agent changed, with a line-by-line diff. **Restore before this change** puts the note back as it was. For a note the agent created, the button reads **Undo (move to trash)**: the note goes to Obsidian's trash, so you can still recover it. A restore is itself a change you can undo.
+Every note an agent changed, with a line-by-line diff. **Restore before this change** puts the note back as it was. For a note the agent created, the button reads **Undo (move to trash)**: the note goes to Obsidian's trash, so you can still recover it. A restore is itself a change you can undo. If the note changes while the restore dialog is open, nothing is replaced and you're asked to look again.
+
+What is kept is set in **Settings → H!V3MYND → Change history**:
+
+- **Redacted** (default): the note text, with keys and tokens masked before it's saved. Restoring brings back the masked text.
+- **Raw**: the exact text, including any keys or passwords an agent wrote, so restoring is exact.
+- **Metadata only**: who changed which note, when, and how many lines; no diff and no undo.
+
+History older than **Keep history for (days)** (30 by default) is deleted when Obsidian starts. **Delete stored history** removes it all at once, with bridge messages and remembered prompts.
 
 ### Tasks
 
@@ -522,7 +539,21 @@ It is off by default, so nothing piles up before your glasses are connected.
 
 ## 14. Agent API reference
 
-Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemynd-Key: <key>`. The key is in Settings and in `~/.hivemynd/listener.key`. Requests from web pages (with an `Origin` header) are refused.
+Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemynd-Key: <key>` (keys in the URL are not accepted). Keys are in Settings → Agent keys; Bridge keys are also saved under `~/.hivemynd/vaults/`. Requests from web pages (with an `Origin` header) are refused.
+
+The agent a request acts as is the one its key belongs to. Where a route takes an agent (`/hook/<agent>`, `?agent=`, `"agent"` in the body), an agent key may only name its own agent or leave it out; Bridge and Admin keys name it per request.
+
+| Answer | Means |
+|---|---|
+| `400` | Not JSON, or not a usable request |
+| `401` | No key, or a key that isn't valid |
+| `403` | The key's kind can't use this route, or it names another agent |
+| `404` | No such route (Developer mode routes answer only in Developer mode) |
+| `413` | Body too large (20 KB for approvals and policy blocks, 200 KB for JSON routes, 1 MB for activity), or more than 500 events or 100 messages |
+| `429` | Too many requests from this key (50 a second, bursts of 300) |
+| `503` | Too many requests in progress |
+
+`POST /prewrite/<agent>` answers `204` to go ahead, or a deny with the reason: Claude Code's PreToolUse format for agents in **Agents that can hear replies**, otherwise `{"decision":"deny","reason"}`. If H!V3MYND couldn't check the write, the answer carries `X-Hivemynd-Check: failed` and, depending on **If a pre-write check fails**, is a deny or a `204`.
 
 ### Activity
 
@@ -532,7 +563,7 @@ Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemy
 | `POST /hook/<agent>` | a tool-hook payload | Parsed for note paths |
 | `POST /prompt/<agent>` | a prompt payload | Remembers the agent's current task |
 | `POST /prewrite/<agent>` | a PreToolUse payload | Saves a copy of the note for undo; may reply with a claim or trust warning |
-| `GET /context-pack?q=&budget=&agent=` | | Relevant notes within a token budget |
+| `GET /context-pack?q=&budget=&agent=` | | Relevant notes within a token budget, without the folders hidden from that agent (an agent with no rule of its own gets every agent's hidden folders) |
 | `GET /health` | | `{"ok", "notes", "version"}` |
 
 ### Teamwork
@@ -566,8 +597,9 @@ Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemy
 | Method and path | Body | Effect |
 |---|---|---|
 | `POST /span/on`, `POST /span/off` | | Start or stop spanning the brain across your chosen monitors |
-| `POST /approve` | `{"agent","action","detail"}` | Asks you to approve an action; `{"approved": true\|false}` |
-| `POST /policy-block` | `{"agent","action","detail"}` | Shows a "blocked by permissions" alert |
+| `POST /approve` | `{"agent","action","detail"}` | Bridge keys. Asks you to approve an action; `{"approved": true\|false}` |
+| `POST /policy-block` | `{"agent","action","detail"}` | Bridge keys. Shows a "blocked by permissions" alert |
+| `POST /bridge-message` | a message or a list of up to 100 | Bridge keys. `204` once saved; `500` if it couldn't be saved (retry with the same id) |
 
 ## 15. Files, network and privacy
 
@@ -579,8 +611,10 @@ Base address: `http://127.0.0.1:27183`. Every request needs the header `X-Hivemy
 | `H!V3MYND/Briefs/` | Daily briefs and time-lapse videos (if the brief is on) |
 | `H!V3MYND/Gaps/` | Starter notes you create from the gap radar |
 | `Access Log/` | Digest notes and brain reports (only if you turn them on) |
-| `~/.hivemynd/listener.key` | The listener key, readable only by you |
-| Obsidian's SecretStorage | Listener key, viewer key and alert URL |
+| `.obsidian/plugins/hivemynd/changes/`, `bridge/` | Change history and bridge messages, one file per day, kept for the retention period |
+| `~/.hivemynd/vaults/<vault>-<id>/` | Bridge keys, readable only by you |
+| `~/.hivemynd/listener.key` | The 1.1 shared key, only until you retire it |
+| Obsidian's SecretStorage | Listener keys, viewer key and alert URL |
 
 If you sync your vault's `.obsidian` folder, the access log syncs with it.
 
@@ -601,6 +635,8 @@ If you sync your vault's `.obsidian` folder, the access log syncs with it.
 - If Obsidian shows "agent listener couldn't start", another program uses the port. Pick another port in Settings and copy the snippets again.
 
 **An agent shows under the wrong name.** Add an alias in Settings → Agents, for example `bot2=claude`.
+
+**An agent gets `403 this key belongs to agent "…"`.** Its hooks use another agent's key, or name another agent in the URL. Copy that agent's own snippet from Settings → Agent keys.
 
 **Undo isn't offered for a change.** Undo needs the copy taken just before the edit. Agents need the PreToolUse hook (Claude Code) or must go through the bridge.
 

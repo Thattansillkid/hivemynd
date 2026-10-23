@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+Security and reliability release, from an external audit of 1.1.0. Thank you to the reviewer who reported it.
+
+**Upgrading:** your 1.1 key keeps working. To finish the move, open Settings → H!V3MYND → Agent keys, click **Create agent keys**, paste each agent's new snippet (and point the bridge at its new key file, see docs/BRIDGE.md), then **Retire shared key**. Developer mode tools now need an Admin key.
+
+- **One key per agent.** Keys have a kind (Observer, Agent, Bridge, Admin) that limits which routes they can use, and an agent key only ever acts as its own agent: naming another agent is refused, and its reports are recorded under its own name. An observer key can report activity but read nothing. An agent without its own permission rule gets every agent's hidden folders in context packs instead of none.
+- **Keys only in the header.** `?key=` is no longer accepted. Malformed requests are answered with 400 and can't stop the listener.
+- **Change history no longer keeps secrets by default.** Keys and tokens are masked before history is saved (Redacted); Raw and Metadata only are options. Masking a secret an agent wrote no longer keeps the unmasked text as an undo point unless history is Raw. History and bridge messages are deleted after 30 days (configurable), and **Delete stored history** clears them.
+- **"Store agent prompts" off now means off everywhere:** access log, change history and claims, and remembered prompts are deleted. Kept prompts have secrets masked. Bridge messages can be stored as metadata only.
+- **Paths in agent events are checked** before any note is read: no `..`, absolute paths outside the vault, drive-relative, UNC or device paths, configuration folder, or links and junctions leading out of the vault.
+- **Limits:** request size caps on every route, per-key rate limits, a cap on requests in progress, at most 2,000 bridge messages in memory, one bridge-message file per day, and bounded reads at startup.
+- **Bridge messages are acknowledged only once saved**, and a failed save answers 500 (retry with the same id is safe). Failed history writes are reported.
+- **Pre-write checks fail closed when you enforce:** if a check can't run, the write is held back when claims or the secret scanner are set to Block (setting: "If a pre-write check fails"). A failed check is always marked `X-Hivemynd-Check: failed`.
+- **Restore checks for edits made after you opened it** and replaces nothing if the note changed.
+- **Key files per vault** under `~/.hivemynd/vaults/`, owner-only on every platform (Windows ACLs are set, not just a POSIX mode). The bridge reads `--key-file` / `HIVEMYND_KEY_FILE`.
+- `nvidia-smi` and `icacls` are run by full path.
+- Tests (vitest) for every audit finding, run in CI and before each release; patched dev dependencies (`npm audit`: 0).
+- SECURITY.md now documents the threat model, key kinds, what is advisory (event labels, pre-write replies, trust scores and context packs), what is stored where, and the limits.
+
 ## 1.1.0
 
 - **User manual** built into the plugin (command, settings button, welcome screen) and in MANUAL.md.

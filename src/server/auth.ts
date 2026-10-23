@@ -76,7 +76,7 @@ export function cleanAgent(name: string) {
 
 // ------------------------------------------------------------------ routes
 
-const DEV = ['/replay', '/focus', '/music', '/system-audio-probe', '/audio-probe', '/audio-levels', '/audio-devices', '/report', '/meaning', '/heat', '/open-monitor', '/reload', '/snapshot', '/span/on', '/span/off'];
+const DEV = ['/replay', '/focus', '/music', '/system-audio-probe', '/audio-probe', '/audio-levels', '/audio-devices', '/report', '/meaning', '/heat', '/open-monitor', '/reload', '/snapshot'];
 
 /** Routes that only answer in Developer mode (and to admin keys). */
 export const DEV_ROUTES = new Set(DEV);
@@ -105,6 +105,8 @@ const ROUTES: Record<string, Scope> = {
   'POST /claim': 'agent',
   'POST /release': 'agent',
   'POST /brief/now': 'agent',
+  'POST /span/on': 'agent',
+  'POST /span/off': 'agent',
 
   'POST /approve': 'bridge',
   'POST /policy-block': 'bridge',
@@ -123,8 +125,6 @@ const ROUTES: Record<string, Scope> = {
   'POST /open-monitor': 'admin',
   'POST /reload': 'admin',
   'GET /snapshot': 'admin',
-  'POST /span/on': 'admin',
-  'POST /span/off': 'admin',
 };
 
 const AGENT_SEGMENT = /^\/(hook|prompt|prewrite)\/([a-z0-9_-]{1,40})$/i;

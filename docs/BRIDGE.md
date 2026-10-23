@@ -7,24 +7,26 @@ H!V3MYND learns what agents do in two ways:
 
 ## 1. The local listener
 
-`http://127.0.0.1:27183` (port configurable). Every request needs the header `X-Hivemynd-Key: <key>`. The key is in Settings → H!V3MYND → Listener key, and in `~/.hivemynd/listener.key`. Requests with an `Origin` header are refused.
+`http://127.0.0.1:27183` (port configurable). Every request needs the header `X-Hivemynd-Key: <key>`. Keys are in Settings → H!V3MYND → Agent keys, one per agent. Requests with an `Origin` header are refused.
+
+An agent key acts only as its own agent: `<agent>` in the path, `?agent=` and `"agent"` in bodies must be that agent or left out (anything else is `403`), and its pulses are recorded as that agent. Bridge keys may name any agent and are the only keys that can use `/approve`, `/policy-block` and `/bridge-message`. See SECURITY.md for every route's key kind, and MANUAL.md section 14 for limits and status codes.
 
 | Method and path | Body | Effect |
 |---|---|---|
-| `POST /pulse` | `{"agent","kind","texts","purpose?","source?"}` | Lights notes and logs the access. `kind` is `read`, `write` or `scan` (search results). `texts` is a list of vault paths, or any strings containing them. |
+| `POST /pulse` | `{"agent?","kind","texts","purpose?","source?"}` | Lights notes and logs the access. `kind` is `read`, `write` or `scan` (search results). `texts` is a list of vault paths, or any strings containing them. |
 | `POST /hook/<agent>` | a raw tool-hook payload (Claude Code PostToolUse format, or similar) | Parsed for note paths per tool type. |
 | `POST /prompt/<agent>` | a UserPromptSubmit-style payload | Remembers what the agent was asked, shown as the purpose of its next accesses. |
 | `POST /prewrite/<agent>` | a PreToolUse-style payload | Snapshots a note before an agent edits it, so the change can be diffed and undone in the Brain Monitor. |
-| `GET /context-pack?q=&budget=&agent=` | | The notes most relevant to `q`, trimmed to `budget` tokens, as JSON. That agent's hidden folders are excluded. |
+| `GET /context-pack?q=&budget=&agent=` | | The notes most relevant to `q`, trimmed to `budget` tokens, as JSON. That agent's hidden folders are excluded; an agent with no rule of its own gets every agent's hidden folders. |
 | `POST /approve` | `{"agent","action","detail"}` | Asks the person at the computer to approve an action; answers `{"approved": true\|false}` (60 s timeout = false). Used by the bridge. |
 | `POST /policy-block` | `{"agent","action","detail"}` | Shows a red "blocked by permissions" alert. Used by the bridge. |
 | `GET /health` | | `{"ok", "notes", "version"}` |
 
-Agent names are free-form (lowercase letters, digits, `-` and `_`). Give each a colour in settings.
+Agent names are free-form (lowercase letters, digits, `-` and `_`). Give each a colour in settings, and its own key under Agent keys.
 
 ### Claude Code
 
-Settings → H!V3MYND → Connect your agents → Copy hooks, then merge into `~/.claude/settings.json`. It adds three `http` hooks: UserPromptSubmit to `/prompt/claude`, PostToolUse to `/hook/claude`, and PreToolUse to `/prewrite/claude`.
+Settings → H!V3MYND → Agent keys → the claude row → Claude Code hooks, then merge into `~/.claude/settings.json`. It adds three `http` hooks: UserPromptSubmit to `/prompt/claude`, PostToolUse to `/hook/claude`, and PreToolUse to `/prewrite/claude`.
 
 ### Any agent with shell hooks
 
@@ -40,10 +42,12 @@ curl -s -m 1 -H "X-Hivemynd-Key: $KEY" --data-binary @- http://127.0.0.1:27183/h
 cd bridge
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python bridge.py init --vault "/path/to/your/vault"
+python bridge.py init --vault "/path/to/your/vault" --key-file "<Bridge key file>"
 python bridge.py add-agent my-agent               # prints the token once
 python bridge.py serve                            # 127.0.0.1:8788
 ```
+
+`<Bridge key file>` is the path shown on the Bridge row in Settings → H!V3MYND → Agent keys (under `~/.hivemynd/vaults/`); make a Bridge key there first if there isn't one. The bridge also reads `HIVEMYND_KEY_FILE` if set. A bridge set up with 1.1 keeps using `~/.hivemynd/listener.key` until you retire the shared key; add `"plugin_key_file"` to its `config.json` before you do.
 
 The agent sends `X-Bridge-Token: <token>` (or `Authorization: Bearer <token>`) with every request:
 

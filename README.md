@@ -36,14 +36,14 @@ Requires Obsidian 1.11.4 or newer on Windows, macOS or Linux.
 
 ## Connect an agent (about a minute)
 
-Open **Settings → H!V3MYND → Connect your agents** and copy a snippet. It already contains your port and key.
+Open **Settings → H!V3MYND → Agent keys** and copy the snippet from that agent's row. It already contains your port and that agent's own key.
 
 - **Claude Code:** paste the hooks into `~/.claude/settings.json` and restart Claude Code.
 - **Anything else:** POST to the local listener:
 
 ```bash
 curl -s -m 1 -H "X-Hivemynd-Key: <your key>" -H "Content-Type: application/json" \
-  -d '{"agent":"my-agent","kind":"read","texts":["Projects/Plan.md"]}' \
+  -d '{"kind":"read","texts":["Projects/Plan.md"]}' \
   http://127.0.0.1:27183/pulse
 ```
 
@@ -55,10 +55,12 @@ Obsidian asks plugins to disclose these. Here is everything H!V3MYND does beyond
 
 | What | When | Why |
 |---|---|---|
-| Local HTTP listener on `127.0.0.1:27183` | When "Agent listener" is on (default) | Receives activity from agents on this computer. Bound to this computer only; every request needs your key; browser-originated requests are refused. |
-| Writes `~/.hivemynd/listener.key` | When the listener is on | Lets local tools and the bridge read the key without copying it by hand. File permissions are owner-only. |
+| Local HTTP listener on `127.0.0.1:27183` | When "Agent listener" is on (default) | Receives activity from agents on this computer. Bound to this computer only; every request needs a key, and each agent's key only acts as that agent; browser-originated requests are refused. |
+| Writes bridge keys to `~/.hivemynd/vaults/<vault>-<id>/` | When you have a Bridge key | Lets the bridge read its key without copying it by hand. Owner-only (mode 0600; on Windows only your account has access). |
+| Writes `~/.hivemynd/listener.key` | Only while the 1.1 shared key is still accepted | For bridges set up with 1.1. Removed when you retire the shared key. |
 | Writes the bridge policy file | Only if you set its path | Your per-agent permission rules, for the optional bridge to enforce. |
-| Runs `nvidia-smi` | While the Brain Monitor is open | Shows GPU load in the System panel. Skipped silently if not present. |
+| Runs `nvidia-smi` | While the Brain Monitor is open | Shows GPU load in the System panel. Run from NVIDIA's install folder only; skipped silently if not present. |
+| Runs `icacls` (Windows) | When it writes a key file | Restricts the key file to your account. |
 | Captures system audio | Only when you turn on music reactivity | Local analysis to animate the brain. Nothing is recorded or sent. |
 | HTTPS POST to your ntfy, Discord or webhook URL | Only if you turn on phone alerts | Sends the alert line (never note contents) to the address you choose. |
 | Sends short lines to the bridge's `glasses` inbox | Only if you turn on the glasses feed | Puts the daily brief summary and approval requests on Even G2 glasses through your own bridge. Reads the sender's token from the bridge token file you choose, at send time; it is never stored. |
